@@ -23,11 +23,143 @@ Parameters:
   DynamoStreamsStartingPosition:
     Type: String
     Default: LATEST
-  NeptuneArtifactsBucket:
-    Type: String
-    Default: aws-blogs-artifacts-public
 
 Resources:
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: 'AES256' 
+      Tags:
+          - Key: demoname
+            Value: neptune-ttl
+
+  Repo2S3:
+    Type: 'Custom::EnvSetup'
+    DependsOn: Repo2S3ExecutionRole
+    Properties:
+      ServiceToken: !GetAtt Repo2S3Func.Arn
+      staging_bucket: !Ref S3Bucket
+
+  Repo2S3Func:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Description: "Repo2S3Func"
+      FunctionName: !Sub "Repo2S3Func-lambda-${AWS::StackName}"
+      Handler: index.lambda_handler
+      Role: !GetAtt AWSLambdaExecutionRole.Arn
+      Timeout: 360
+      Tags:
+          - Key: demoname
+            Value: neptune-ttl
+      Runtime: python3.9
+      Code:
+        ZipFile: |
+          import json
+          import urllib3
+          import boto3
+          import cfnresponse
+
+          http = urllib3.PoolManager()
+          DATA_FILES = {
+            "cfn": ["neptune-stack.yaml", "network-stack.yaml"]
+            "lambda: ["neptune-poller.zip", "neptune-streams-layer.zip"],
+            "notebook": ["TTL_Notebook.ipynb"] 
+          }
+
+          def copy_s3_s3(s3_client, source_bucket, target_bucket, folder, key):
+            s3_path = folder+"/"+key
+            local_path = "/tmp/" + key
+            s3_client.download_file(source_bucket, s3_path, local_path)
+            s3_client.upload_file(Bucket = target_bucket, Key = s3_path, Filename = local_path, ExtraArgs={"ServerSideEncryption": "AES256"})
+
+          def copy_web_s3(url, s3_client, bucket, folder, key):
+            s3_path = folder+"/"+key
+            local_path = "/tmp/" + key
+            fileurl = url + "/" + folder + "/" + key
+            print("loading web file *" + fileurl + "*")
+            the_file = http.request('GET',fileurl, preload_content=False)
+            print("Got file")
+            local_file = open(local_path, 'wb')
+            local_file.write(the_file.data)
+            local_file.close()
+            print("upload *" + s3_path + "*" + local_path + "*")
+            s3_client.upload_file(Bucket = bucket, Key = s3_path, Filename = local_path, ExtraArgs={"ServerSideEncryption": "AES256"})
+
+          def lambda_handler(event, context):
+            the_event = event['RequestType']
+            print(event)
+            print("The event type is: ", str(the_event))
+            response_data = {}
+            try:
+              staging_bucket = event['ResourceProperties']['staging_bucket']
+              if the_event in ('Create', 'Update'):
+                s3c = boto3.client('s3')
+                print("Creating/Updating")
+                for folder in DATA_FILES:
+                  for filename in DATA_FILES[folder]:
+                    #copy_s3_s3(s3c, source_bucket, staging_bucket, folder, filename)
+                    copy_web_s3("https://raw.githubusercontent.com/aws-samples/neptune-m2c-kg/main", s3c, staging_bucket, folder, filename)
+                    #copy_web_s3("https://github.com/aws-samples/neptune-m2c-kg", s3c, staging_bucket, folder, filename)
+
+                response_data['Data'] = 'git success'
+                cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data)
+              elif the_event in ('Delete'):
+                print("Deleting")
+                s3r = boto3.resource('s3')
+                s3r.Bucket(str(staging_bucket)).objects.all().delete()
+                cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data)
+              else:
+                response_data['Data'] = "Illegal event " + the_event
+                cfnresponse.send(event, context, cfnresponse.FAILED, response_data)
+            except Exception as e:
+              print("Operation failed...")
+              print(str(e))
+              response_data['Data'] = str(e)
+              cfnresponse.send(event, context, cfnresponse.FAILED, response_data)
+
+  Repo2S3ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+        Version: "2012-10-17"
+      Path: "/"
+      Policies:
+        - PolicyDocument:
+            Statement:
+              - Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Effect: Allow
+                Resource: arn:aws:logs:*:*:*
+            Version: "2012-10-17"
+          PolicyName: !Sub "Repo2S3pol-CW-${AWS::StackName}"
+        - PolicyDocument:
+            Statement:
+              - Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:List*
+                Effect: Allow
+                Resource:
+                  - !Sub arn:aws:s3:::${S3Bucket}/*
+                  - !Sub arn:aws:s3:::${S3Bucket}
+            Version: "2012-10-17"
+          PolicyName: !Sub "Repo2S3pol-S3-${AWS::StackName}"
+      RoleName: !Sub "Repo2S3role-${AWS::StackName}"
+
 
   LambdaRole:
     Type: 'AWS::IAM::Role'
@@ -87,12 +219,13 @@ Resources:
 
   PythonLambdaLayer:
     Type: "AWS::Lambda::LayerVersion"
+    DependsOn: !Ref Repo2S3
     Properties:
       CompatibleRuntimes:
         - python3.9
       Content:
-        S3Bucket: !Ref NeptuneArtifactsBucket
-        S3Key: 'artifacts/DBBLOG-2616/layer/neptune-layer.zip'
+        S3Bucket: !Ref S3Bucket
+        S3Key: 'layer/neptune-streams.layer.zip'
 
 
   DynamoStreamsEventSourceMapping:
@@ -363,8 +496,8 @@ Resources:
           - NetworkStack
           - Outputs.PrivateRouteTableIDs
         CreateCloudWatchAlarm: 'false'
-        LambdaS3Bucket: !Ref NeptuneArtifactsBucket
-        LambdaS3Key: 'artifacts/DBBLOG-2616/layer/neptune-streams-layer.zip'
+        LambdaS3Bucket: !Ref S3Bucket
+        LambdaS3Key: 'layer/neptune-streams-layer.zip'
         MaxPollingWaitTime: 5
         StepFunctionFallbackPeriod: 1
         StepFunctionFallbackPeriodUnit: minute
@@ -476,8 +609,8 @@ Resources:
               - !Ref AWS::Region
               - "' >> ~/.bashrc\n"
               - aws s3 cp s3://
-              - !Ref NeptuneArtifactsBucket
-              - /artifacts/DBBLOG-2616/notebook/TTL_Notebook.ipynb /home/ec2-user/SageMaker/TTL_Notebook.ipynb
+              - !Ref S3Bucket
+              - /notebook/TTL_Notebook.ipynb /home/ec2-user/SageMaker/TTL_Notebook.ipynb
               - "\n"
               - aws s3 cp s3://aws-neptune-notebook/graph_notebook.tar.gz /tmp/graph_notebook.tar.gz
               - "\n"
