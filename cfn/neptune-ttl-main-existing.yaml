@@ -1,0 +1,594 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0Description: CloudFormation template to deploy the Neptune TTL solution with DynamoDB
+Description: CloudFormation template to deploy the Neptune TTL solution with DynamoDB
+
+Parameters:
+  ApplicationID:
+    Description: A name to describe your application. This value is used to help tag launched resources. 
+    Type: String
+    AllowedPattern: "[-a-z0-9]+"
+    MaxLength: 50
+  NeptuneClusterId:
+    Description: The cluster ID of your Neptune cluster. E.g. neptune-streams-ttl-cluster
+    Type: String
+  NeptuneClusterResourceId:
+    Description: The resource ID of your Neptune cluster. E.g. cluster-RA3EHUHQDJHK3GJRFZFLX2BAZY
+    Type: String
+  NeptuneEndpoint:
+    Description: The reader endpoint of your Neptune cluster. E.g. neptune-streams-ttl-cluster.cluster-ro-c7iaw37o0cgf.us-east-1.neptune.amazonaws.com
+    Type: String
+  NeptunePort:
+    Description: The port used for your Neptune cluster. E.g. 8182
+    Type: String
+  NeptuneTTLPropertyName:
+    Description: The name of the property in Neptune that is used to denote TTL. 
+    Type: String
+    Default: 'TTL'
+  VPC:
+    Description: The VPC of your Neptune cluster.
+    Type: AWS::EC2::VPC::Id
+  SubnetIds: 
+    Description: The subnets that are part of the subnet group of your Neptune cluster. 
+    Type: List<AWS::EC2::Subnet::Id>
+  SecurityGroupIds:
+    Description: The security groups of your Neptune cluster.
+    Type: List<AWS::EC2::SecurityGroup::Id>
+  RouteTableIds:
+    Description: The comma-delimited list of route tables used by the subnets in the subnet group of your Neptune cluster. E.g. rtb-00e54f450714acc6c,rtb-076b097f6034a58ae,rtb-0576c848d9dabcd2f
+    Type: String
+  CreateDDBVPCEndPoint:
+    Description: Flag used to determine whether to create a DynamoDB VPC Endpoint or not. Select false if there is a DynamoDB VPC endpoint already present in your VPC (com.amazonaws.<region>.dynamodb).
+    Type: String
+    Default: 'true'
+    AllowedValues:
+    - 'true'
+    - 'false'
+  CreateMonitoringEndPoint:
+      Type: String
+      Default: 'true'
+      AllowedValues:
+      - 'true'
+      - 'false'
+      Description: Flag used to determine whether to create a Monitoring VPC Endpoint or not. Select false if there is a Monitoring VPC endpoint already present in your VPC (com.amazonaws.<region>.monitoring).
+  DynamoRCU:
+    Type: String
+    Default: 5
+  DynamoWCU:
+    Type: String
+    Default: 5
+  DynamoStreamsBatchSize:
+    Type: Number
+    Default: 100
+  DynamoStreamsStartingPosition:
+    Type: String
+    Default: LATEST
+  NeptuneArtifactsBucket:
+    Type: String
+    Default: aws-blogs-artifacts-public
+
+Resources:
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: 'AES256' 
+      Tags:
+          - Key: demoname
+            Value: neptune-ttl
+
+  Repo2S3:
+    Type: 'Custom::EnvSetup'
+    DependsOn: Repo2S3ExecutionRole
+    Properties:
+      ServiceToken: !GetAtt Repo2S3Func.Arn
+      staging_bucket: !Ref S3Bucket
+
+  Repo2S3Func:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Description: "Repo2S3Func"
+      FunctionName: !Sub "Repo2S3Func-lambda-${AWS::StackName}"
+      Handler: index.lambda_handler
+      Role: !GetAtt AWSLambdaExecutionRole.Arn
+      Timeout: 360
+      Tags:
+          - Key: demoname
+            Value: neptune-ttl
+      Runtime: python3.9
+      Code:
+        ZipFile: |
+          import json
+          import urllib3
+          import boto3
+          import cfnresponse
+
+          http = urllib3.PoolManager()
+          DATA_FILES = {
+            "cfn": ["neptune-stack.yaml", "network-stack.yaml"]
+            "lambda: ["neptune-poller.zip", "neptune-streams-layer.zip"],
+            "notebook": ["TTL_Notebook.ipynb"] 
+          }
+
+          def copy_s3_s3(s3_client, source_bucket, target_bucket, folder, key):
+            s3_path = folder+"/"+key
+            local_path = "/tmp/" + key
+            s3_client.download_file(source_bucket, s3_path, local_path)
+            s3_client.upload_file(Bucket = target_bucket, Key = s3_path, Filename = local_path, ExtraArgs={"ServerSideEncryption": "AES256"})
+
+          def copy_web_s3(url, s3_client, bucket, folder, key):
+            s3_path = folder+"/"+key
+            local_path = "/tmp/" + key
+            fileurl = url + "/" + folder + "/" + key
+            print("loading web file *" + fileurl + "*")
+            the_file = http.request('GET',fileurl, preload_content=False)
+            print("Got file")
+            local_file = open(local_path, 'wb')
+            local_file.write(the_file.data)
+            local_file.close()
+            print("upload *" + s3_path + "*" + local_path + "*")
+            s3_client.upload_file(Bucket = bucket, Key = s3_path, Filename = local_path, ExtraArgs={"ServerSideEncryption": "AES256"})
+
+          def lambda_handler(event, context):
+            the_event = event['RequestType']
+            print(event)
+            print("The event type is: ", str(the_event))
+            response_data = {}
+            try:
+              staging_bucket = event['ResourceProperties']['staging_bucket']
+              if the_event in ('Create', 'Update'):
+                s3c = boto3.client('s3')
+                print("Creating/Updating")
+                for folder in DATA_FILES:
+                  for filename in DATA_FILES[folder]:
+                    copy_web_s3("https://raw.githubusercontent.com/aws-samples/amazon-neptune-ttl-repo/main", s3c, staging_bucket, folder, filename)
+
+                response_data['Data'] = 'git success'
+                cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data)
+              elif the_event in ('Delete'):
+                print("Deleting")
+                s3r = boto3.resource('s3')
+                s3r.Bucket(str(staging_bucket)).objects.all().delete()
+                cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data)
+              else:
+                response_data['Data'] = "Illegal event " + the_event
+                cfnresponse.send(event, context, cfnresponse.FAILED, response_data)
+            except Exception as e:
+              print("Operation failed...")
+              print(str(e))
+              response_data['Data'] = str(e)
+              cfnresponse.send(event, context, cfnresponse.FAILED, response_data)
+
+  Repo2S3ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+        Version: "2012-10-17"
+      Path: "/"
+      Policies:
+        - PolicyDocument:
+            Statement:
+              - Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Effect: Allow
+                Resource: arn:aws:logs:*:*:*
+            Version: "2012-10-17"
+          PolicyName: !Sub "Repo2S3pol-CW-${AWS::StackName}"
+        - PolicyDocument:
+            Statement:
+              - Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:List*
+                Effect: Allow
+                Resource:
+                  - !Sub arn:aws:s3:::${S3Bucket}/*
+                  - !Sub arn:aws:s3:::${S3Bucket}
+            Version: "2012-10-17"
+          PolicyName: !Sub "Repo2S3pol-S3-${AWS::StackName}"
+      RoleName: !Sub "Repo2S3role-${AWS::StackName}"
+
+  LambdaRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action:
+              - 'sts:AssumeRole'
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+      Path: "/"
+      Policies:
+        - PolicyDocument:
+            Statement:
+              - Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Effect: Allow
+                Resource: arn:aws:logs:*:*:*
+            Version: "2012-10-17"
+          PolicyName: !Sub "alr-CW-${AWS::StackName}"
+        - PolicyDocument:
+            Statement:
+              - Action:
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface
+                  - ec2:DetachNetworkInterface
+                Effect: Allow
+                Resource: '*'
+            Version: "2012-10-17"
+          PolicyName: !Sub "alr-ec2-${AWS::StackName}"
+        - PolicyDocument:
+            Statement:
+              - Action:
+                  - dynamodb:*
+                Effect: Allow
+                Resource: !GetAtt
+                  - DynamoTTLTable
+                  - Arn
+            Version: "2012-10-17"
+          PolicyName: !Sub "alr-ddb-${AWS::StackName}"
+        - PolicyDocument:
+            Statement:
+              - Action:
+                  - dynamodb:*
+                Effect: Allow
+                Resource: !GetAtt
+                  - DynamoTTLTable
+                  - StreamArn
+            Version: "2012-10-17"
+          PolicyName: !Sub "alr-ddbstream-${AWS::StackName}"
+
+  PythonLambdaLayer:
+    Type: "AWS::Lambda::LayerVersion"
+    DependsOn: Repo2S3
+    Properties:
+      CompatibleRuntimes:
+        - python3.9
+      Content:
+        S3Bucket: !Ref S3Bucket
+        S3Key: 'layer/neptune-streams.layer.zip'
+
+
+  DynamoStreamsEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      BatchSize: !Ref DynamoStreamsBatchSize
+      FunctionName: !GetAtt
+        - DynamoStreamsToNeptuneLambda
+        - Arn
+      EventSourceArn: !GetAtt
+        - DynamoTTLTable
+        - StreamArn
+      StartingPosition: !Ref DynamoStreamsStartingPosition
+
+  DynamoTTLTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      KeySchema:
+        -
+          AttributeName: "ObjectId"
+          KeyType: "HASH"
+      ProvisionedThroughput:
+        ReadCapacityUnits: !Ref DynamoRCU
+        WriteCapacityUnits: !Ref DynamoWCU
+      TableName: !Sub 'NeptuneObject2TTL-${ApplicationID}'
+      TimeToLiveSpecification:
+        Enabled: True
+        AttributeName: "TTL"
+      StreamSpecification:
+        StreamViewType: "NEW_AND_OLD_IMAGES"
+      AttributeDefinitions:
+        -
+          AttributeName: "ObjectId"
+          AttributeType: "S"
+
+  DynamoStreamsToNeptuneLambda:
+      Type: 'AWS::Lambda::Function'
+      Properties:
+        Timeout: 900
+        VpcConfig:
+          SecurityGroupIds: !Ref SecurityGroupIds
+          SubnetIds: !Ref SubnetIds
+        Environment:
+          Variables:
+            neptunedb: !Ref NeptuneEndpoint
+        Handler: index.lambda_handler
+        Code:
+          ZipFile: |
+            from __future__ import print_function  # Python 2/3 compatibility
+
+            from gremlin_python import statics
+            from gremlin_python.structure.graph import Graph
+            from gremlin_python.driver import client
+            from gremlin_python.process.graph_traversal import __
+            from gremlin_python.process.strategies import *
+            from gremlin_python.driver.driver_remote_connection import DriverRemoteConnection
+            from gremlin_python.process.traversal import T
+
+            import json
+            import sys
+            import os
+            import subprocess
+
+            '''
+            Lambda function that is triggered by Dynamo DB streams when a record of form (ObjectId, ObjectType, TTL) is removed from DynamoDB
+            table because it has expired based on TTL value. In Neptune, there is a vertex or edge -- having that ObjectType -- with that ObjectId,
+            and it was meant to expire at TTL too. So we drop that object here.
+            In effect, we use TTL expiration in Dynamo guide us to expire in Neptune.
+            '''
+
+            neptuneEndpoint = 'wss://' + os.environ['neptunedb'] + ':8182/gremlin'
+            print('neptuneEndpoint ' + neptuneEndpoint)
+
+            '''
+            Here is what the dynamo event looks like:
+            {
+               "eventID":"5b9c3a2f512384e38a03461c6eac2e20",
+               "eventName":"REMOVE",
+               "eventVersion":"1.1",
+               "eventSource":"aws:dynamodb",
+               "awsRegion":"us-east-1",
+               "dynamodb":{
+                  "ApproximateCreationDateTime":1658792585.0,
+                  "Keys":{
+                     "ObjectId":{
+                        "S":"qbz_12922"
+                     }
+                  },
+                  "OldImage":{
+                     "ObjectType":{
+                        "S":"vertex"
+                     },
+                     "ObjectId":{
+                        "S":"qbz_12922"
+                     },
+                     "TTL":{
+                        "N":"1658792051"
+                     }
+                  },
+                  "SequenceNumber":"1165100000000038987329528",
+                  "SizeBytes":59,
+                  "StreamViewType":"NEW_AND_OLD_IMAGES"
+               },
+               "userIdentity":{
+                  "principalId":"dynamodb.amazonaws.com",
+                  "type":"Service"
+               },
+               "eventSourceARN":"arn:aws:dynamodb:us-east-1:<acctnum>:table/NeptuneObject2TTL/stream/2022-07-25T18:36:21.548"
+            }
+            '''
+
+            '''
+            A note on robustness and error handling. This function is triggered by Dynamo Streams. If we fail to
+            handle the Dynamo Streams events, Dynamo Streams will NOT resend the events for us to retry later. So we
+            recommend you monitor this function for errors and have a process in place to address errors. Errors are
+            unlikely to occur, but when they do, you can use the function logs in CloudWatch to determine what failed.
+            The function logs the complete Dynamo Streams event. It also logs each TTL removal attempted. And it
+            logs whether the removal was successful or had an error. If the function should time out, the logs
+            will also show that.
+
+            If you configure the Dynamo Streams batch size appropriately, timeouts will be unlikely.  One possible cause
+            for a timeout is removing a node having a very large number of edges. Such a node is called a "supernode." This function
+            does not have special logic for supernodes. For more discussion, refer to the blog post.
+            '''
+
+            def lambda_handler(event, context):
+
+                # obtain Neptune connection
+                graph = Graph()
+                print('**Connecting + *' + neptuneEndpoint + '*')
+                drc = DriverRemoteConnection(neptuneEndpoint, 'g')
+                g = graph.traversal().withRemote(drc)
+                print(event)
+
+                # validate Dynamo streams input - should be list of records
+                if not 'Records' in event:
+                    raise Exception('No Records in event')
+                for r in event['Records']:
+                    # consider only records REMOVEd by dynamodb itself as part of automatic TTL mechanism
+                    if r['eventName'] == 'REMOVE' and 'userIdentity' in r and r['userIdentity']['principalId'] =='dynamodb.amazonaws.com':
+                        obj_id = r['dynamodb']['Keys']['ObjectId']['S']
+                        obj_type = r['dynamodb']['OldImage']['ObjectType']['S']
+                        # remove corresponding object from Neptune - vertex or edge
+                        try:
+                            if obj_type == 'vertex':
+                                print('dropping ' + obj_id)
+                                g.V(obj_id).drop().toList()
+                                print('dropped ' + obj_id)
+                            elif obj_type == 'edge':
+                                print('dropping ' + obj_id)
+                                g.E(obj_id).drop().toList()
+                                print('dropped ' + obj_id)
+                        except Exception as ex:
+                            template = "An exception of type {0} occurred. Arguments:\n{1!r}"
+                            message = template.format(type(ex).__name__, ex.args)
+                            print("Exception processing Neptune object " + obj_id + " of type " + obj_type + " exception " + message)
+
+                return {'statusCode': 200, 'body': json.dumps('Success')}
+
+
+        Role: !GetAtt
+          - LambdaRole
+          - Arn
+        Runtime: python3.9
+        Layers:
+          - !Ref PythonLambdaLayer
+
+  NeptuneStreamsStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: Repo2S3
+    Properties:
+      TemplateURL: https://s3.amazonaws.com/aws-neptune-customer-samples/neptune-stream/neptune_stream_poller_nested_full_stack.json
+      Parameters:
+        ApplicationName:
+          Ref: ApplicationID
+        AdditionalParams:
+          Fn::Join:
+          - ''
+          - - '{"dynamodb_table":"'
+            - !Ref DynamoTTLTable
+            - '", "neptune_endpoint":"'
+            - !Ref NeptuneEndpoint
+            - '", "neptune_ttl_property_name":"'
+            - !Ref NeptuneTTLPropertyName
+            - "\"}"
+        LambdaMemorySize: 2048
+        StreamRecordsHandler: neptune_stream_handler.NeptuneStreamHandler
+        ManagedPolicies: arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess
+        NeptuneStreamEndpoint:
+          Fn::Join:
+          - ''
+          - - https://
+            - Ref: NeptuneEndpoint
+            - ":"
+            - Ref: NeptunePort
+            - "/gremlin/stream"
+        VPC: !Ref VPC
+        SubnetIds: !Join 
+          - ','
+          - !Ref SubnetIds
+        SecurityGroupIds: !Join 
+          - ','
+          - !Ref SecurityGroupIds
+        RouteTableIds: !Ref RouteTableIds
+        CreateCloudWatchAlarm: 'false'
+        LambdaS3Bucket: !Ref S3Bucket
+        LambdaS3Key: 'layer/neptune-streams-layer.zip'
+        MaxPollingWaitTime: 5
+        StepFunctionFallbackPeriod: 1
+        StepFunctionFallbackPeriodUnit: minute
+      TimeoutInMinutes: '20'
+      Tags:
+      - Key: InfrastructureID
+        Value:
+          Ref: AWS::StackName
+      - Key: ApplicationID
+        Value:
+          Ref: ApplicationID
+
+  NeptuneNotebookInstance:
+    Type: AWS::SageMaker::NotebookInstance
+    Properties:
+      PlatformIdentifier: notebook-al2-v2
+      NotebookInstanceName: !Join [ '', [ 'aws-neptune-ttl-', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]] ] ]
+      InstanceType: ml.t2.medium
+      SubnetId: !Select [ 0, !Ref SubnetIds ]
+      SecurityGroupIds: !Ref SecurityGroupIds
+      RoleArn: !GetAtt NeptuneNotebookRole.Arn
+      LifecycleConfigName:
+        Fn::GetAtt:
+        - NeptuneNotebookInstanceLifecycleConfig
+        - NotebookInstanceLifecycleConfigName
+      Tags:
+      - Key: aws-neptune-cluster-id
+        Value: !Ref NeptuneClusterId
+      - Key: aws-neptune-resource-id
+        Value: !Ref NeptuneClusterResourceId
+
+  NeptuneNotebookRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - sagemaker.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: SagemakerNotebookNeptunePolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - cloudwatch:PutMetricData
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:*
+          - Effect: Allow
+            Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:DescribeLogStreams
+            - logs:PutLogEvents
+            - logs:GetLogEvents
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:*
+          - Effect: Allow
+            Action: neptune-db:*
+            Resource: '*'
+          - Effect: Allow
+            Action:
+            - s3:Put*
+            - s3:Get*
+            - s3:List*
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:s3:::*
+
+  NeptuneNotebookInstanceLifecycleConfig:
+    Type: AWS::SageMaker::NotebookInstanceLifecycleConfig
+    DependsOn: Repo2S3
+    Properties:
+      OnStart:
+      - Content:
+          Fn::Base64:
+            Fn::Join:
+            - ''
+            - - "#!/bin/bash\n"
+              - sudo -u ec2-user -i << 'EOF'
+              - "\n"
+              - echo 'export GRAPH_NOTEBOOK_AUTH_MODE=
+              - 'DEFAULT'
+              - "' >> ~/.bashrc\n"
+              - echo 'export GRAPH_NOTEBOOK_HOST=
+              - !Ref NeptuneEndpoint
+              - "' >> ~/.bashrc\n"
+              - echo 'export GRAPH_NOTEBOOK_PORT=
+              - !Ref NeptunePort
+              - "' >> ~/.bashrc\n"
+              - echo 'export NEPTUNE_LOAD_FROM_S3_ROLE_ARN=
+              - "' >> ~/.bashrc\n"
+              - echo 'export AWS_REGION=
+              - !Ref AWS::Region
+              - "' >> ~/.bashrc\n"
+              - aws s3 cp s3://
+              - !Ref S3Bucket
+              - /notebook/TTL_Notebook.ipynb /home/ec2-user/SageMaker/TTL_Notebook.ipynb
+              - "\n"
+              - aws s3 cp s3://aws-neptune-notebook/graph_notebook.tar.gz /tmp/graph_notebook.tar.gz
+              - "\n"
+              - rm -rf /tmp/graph_notebook
+              - "\n"
+              - tar -zxvf /tmp/graph_notebook.tar.gz -C /tmp
+              - "\n"
+              - /tmp/graph_notebook/install.sh
+              - "\n"
+              - EOF
+Outputs:
+  NeptuneNotebook:
+    Description: Neptune Notebook URL
+    Value:
+      Fn::Join: [ "", [ "https://", Fn::GetAtt: [ NeptuneNotebookInstance, NotebookInstanceName ], ".notebook.", !Ref AWS::Region, ".sagemaker.aws/tree" ] ]
+      
+
