@@ -3,14 +3,10 @@
 
 Parameters:
   ApplicationID:
-    Description: Application ID
+    Description: A name to describe your application. This value is used to help tag launched resources.
     Type: String
     AllowedPattern: "[-a-z0-9]+"
     MaxLength: 50
-  Env:
-    Type: String
-    Default: test
-    MinLength: 1
   DynamoRCU:
     Type: String
     Default: 5
@@ -23,6 +19,10 @@ Parameters:
   DynamoStreamsStartingPosition:
     Type: String
     Default: LATEST
+  NeptuneTTLPropertyName:
+    Description: The name of the property in Neptune that is used to denote TTL. ___ TODO _____ THIS MEANS WE CHANGE THE CODE TOO
+    Type: String
+    Default: 'TTL'
 
 Resources:
   S3Bucket:
@@ -101,9 +101,7 @@ Resources:
                 print("Creating/Updating")
                 for folder in DATA_FILES:
                   for filename in DATA_FILES[folder]:
-                    #copy_s3_s3(s3c, source_bucket, staging_bucket, folder, filename)
-                    copy_web_s3("https://raw.githubusercontent.com/aws-samples/neptune-m2c-kg/main", s3c, staging_bucket, folder, filename)
-                    #copy_web_s3("https://github.com/aws-samples/neptune-m2c-kg", s3c, staging_bucket, folder, filename)
+                    copy_web_s3("https://raw.githubusercontent.com/aws-samples/amazon-neptune-ttl-repo/main", s3c, staging_bucket, folder, filename)
 
                 response_data['Data'] = 'git success'
                 cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data)
@@ -219,7 +217,7 @@ Resources:
 
   PythonLambdaLayer:
     Type: "AWS::Lambda::LayerVersion"
-    DependsOn: !Ref Repo2S3
+    DependsOn: Repo2S3
     Properties:
       CompatibleRuntimes:
         - python3.9
@@ -250,7 +248,7 @@ Resources:
       ProvisionedThroughput:
         ReadCapacityUnits: !Ref DynamoRCU
         WriteCapacityUnits: !Ref DynamoWCU
-      TableName: !Sub 'NeptuneObject2TTL-${Env}'
+      TableName: !Sub 'NeptuneObject2TTL-${ApplicationID}'
       TimeToLiveSpecification:
         Enabled: True
         AttributeName: "TTL"
@@ -409,8 +407,10 @@ Resources:
 
   NetworkStack:
     Type: AWS::CloudFormation::Stack
+    DependsOn: Repo2S3
     Properties:
-      TemplateURL: "https://aws-blogs-artifacts-public.s3.amazonaws.com/artifacts/DBBLOG-2616/cfn/network-stack.yaml"
+
+      TemplateURL: !Sub "https://s3.amazonaws.com/${S3Bucket}/cfn/network-stack.yaml"
       Parameters:
         InfrastructureID:
           Ref: AWS::StackName
@@ -424,8 +424,9 @@ Resources:
     Type: AWS::CloudFormation::Stack
     DependsOn:
     - NetworkStack
+    - Repo2S3
     Properties:
-      TemplateURL: "https://aws-blogs-artifacts-public.s3.amazonaws.com/artifacts/DBBLOG-2616/cfn/neptune-stack.yaml"
+      TemplateURL: !Sub "https://s3.amazonaws.com/${S3Bucket}/cfn/neptune-stack.yaml"
       Parameters:
         InfrastructureID:
           Ref: AWS::StackName
@@ -444,6 +445,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     DependsOn:
     - NeptuneStack
+    - Repo2S3
     Properties:
       TemplateURL: https://s3.amazonaws.com/aws-neptune-customer-samples/neptune-stream/neptune_stream_poller_nested_full_stack.json
       Parameters:
@@ -458,6 +460,8 @@ Resources:
             - Fn::GetAtt:
               - NeptuneStack
               - Outputs.NeptuneDBClusterEndpoint
+            - '", "neptune_ttl_property_name":"'
+            - !Ref NeptuneTTLPropertyName
             - "\"}"
         LambdaMemorySize: 2048
         StreamRecordsHandler: neptune_stream_handler.NeptuneStreamHandler
@@ -514,9 +518,8 @@ Resources:
     Type: AWS::SageMaker::NotebookInstance
     Properties:
       PlatformIdentifier: notebook-al2-v2
-      NotebookInstanceName: !Join
-                          - ''
-                          - - 'aws-neptune-ttl'
+      NotebookInstanceName: !Join [ '', [ 'aws-neptune-ttl-', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]] ] ]
+
       InstanceType: ml.t2.medium
       SubnetId:
         Fn::GetAtt:
@@ -584,7 +587,9 @@ Resources:
 
   NeptuneNotebookInstanceLifecycleConfig:
     Type: AWS::SageMaker::NotebookInstanceLifecycleConfig
-    DependsOn: NeptuneStack
+    DependsOn: 
+    - NeptuneStack
+    - Repo2S3
     Properties:
       OnStart:
       - Content:
