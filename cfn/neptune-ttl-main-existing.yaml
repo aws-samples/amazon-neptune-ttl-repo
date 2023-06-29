@@ -96,7 +96,7 @@ Resources:
       Description: "Repo2S3Func"
       FunctionName: !Sub "Repo2S3Func-lambda-${AWS::StackName}"
       Handler: index.lambda_handler
-      Role: !GetAtt AWSLambdaExecutionRole.Arn
+      Role: !GetAtt Repo2S3ExecutionRole.Arn
       Timeout: 360
       Tags:
           - Key: demoname
@@ -111,8 +111,8 @@ Resources:
 
           http = urllib3.PoolManager()
           DATA_FILES = {
-            "cfn": ["neptune-stack.yaml", "network-stack.yaml"]
-            "lambda: ["neptune-poller.zip", "neptune-streams-layer.zip"],
+            "cfn": ["neptune-stack.yaml", "network-stack.yaml"],
+            "lambda": ["neptune-poller.zip", "neptune-streams-layer.zip"],
             "notebook": ["TTL_Notebook.ipynb"] 
           }
 
@@ -144,7 +144,7 @@ Resources:
             response_data = {}
             try:
               staging_bucket = event['ResourceProperties']['staging_bucket']
-              git_token = event['ResourceProperties']['git_token']
+              token = event['ResourceProperties']['git_token']
               if the_event in ('Create', 'Update'):
                 s3c = boto3.client('s3')
                 print("Creating/Updating")
