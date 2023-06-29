@@ -84,10 +84,11 @@ Resources:
             s3_path = folder+"/"+key
             local_path = "/tmp/" + key
             fileurl = url + "/" + folder + "/" + key
+            fields={}
             if len(token) > 0:
-              fileurl = fileurl + "?token=" + token
-            print("loading web file *" + fileurl + "*")
-            the_file = http.request('GET',fileurl, preload_content=False)
+              fields['token'] = token
+            print("loading web file *" + fileurl + "* with " + str(fields))
+            the_file = http.request('GET',fileurl, fields, preload_content=False)
             print("Got file")
             local_file = open(local_path, 'wb')
             local_file.write(the_file.data)
