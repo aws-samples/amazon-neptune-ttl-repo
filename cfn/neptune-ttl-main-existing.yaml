@@ -65,6 +65,9 @@ Parameters:
   NeptuneArtifactsBucket:
     Type: String
     Default: aws-blogs-artifacts-public
+  InterimDownloadToken:
+    Description: Token to be used for private download while repo is private
+    Type: String
 
 Resources:
   S3Bucket:
@@ -85,6 +88,7 @@ Resources:
     Properties:
       ServiceToken: !GetAtt Repo2S3Func.Arn
       staging_bucket: !Ref S3Bucket
+      git_token: !Ref InterimDownloadToken
 
   Repo2S3Func:
     Type: "AWS::Lambda::Function"
@@ -118,10 +122,12 @@ Resources:
             s3_client.download_file(source_bucket, s3_path, local_path)
             s3_client.upload_file(Bucket = target_bucket, Key = s3_path, Filename = local_path, ExtraArgs={"ServerSideEncryption": "AES256"})
 
-          def copy_web_s3(url, s3_client, bucket, folder, key):
+          def copy_web_s3(url, s3_client, bucket, folder, key, token):
             s3_path = folder+"/"+key
             local_path = "/tmp/" + key
             fileurl = url + "/" + folder + "/" + key
+            if len(token) > 0:
+              fileurl = fileurl + "?token=" + token
             print("loading web file *" + fileurl + "*")
             the_file = http.request('GET',fileurl, preload_content=False)
             print("Got file")
@@ -138,12 +144,13 @@ Resources:
             response_data = {}
             try:
               staging_bucket = event['ResourceProperties']['staging_bucket']
+              git_token = event['ResourceProperties']['git_token']
               if the_event in ('Create', 'Update'):
                 s3c = boto3.client('s3')
                 print("Creating/Updating")
                 for folder in DATA_FILES:
                   for filename in DATA_FILES[folder]:
-                    copy_web_s3("https://raw.githubusercontent.com/aws-samples/amazon-neptune-ttl-repo/main", s3c, staging_bucket, folder, filename)
+                    copy_web_s3("https://raw.githubusercontent.com/aws-samples/amazon-neptune-ttl-repo/main", s3c, staging_bucket, folder, filename, token)
 
                 response_data['Data'] = 'git success'
                 cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data)
