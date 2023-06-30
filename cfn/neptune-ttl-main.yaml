@@ -78,6 +78,7 @@ Resources:
             source_path = source_folder+"/"+key
             target_path = target_folder+"/"+key
             local_path = "/tmp/" + key
+            print("s3 cp" + str([source_bucket, source_path, target_bucket, target_path]))
             s3_client.download_file(source_bucket, source_path, local_path)
             s3_client.upload_file(Bucket = target_bucket, Key = target_path, Filename = local_path, ExtraArgs={"ServerSideEncryption": "AES256"})
 
@@ -159,8 +160,11 @@ Resources:
                   - s3:List*
                 Effect: Allow
                 Resource:
+                  # TODO - remove the aws-blogs-artifacts-public once public
                   - !Sub arn:aws:s3:::${S3Bucket}/*
                   - !Sub arn:aws:s3:::${S3Bucket}
+                  - !Sub arn:aws:s3:::aws-blogs-artifacts-public/*
+                  - !Sub arn:aws:s3:::aws-blogs-artifacts-public
             Version: "2012-10-17"
           PolicyName: !Sub "Repo2S3pol-S3-${AWS::StackName}"
       RoleName: !Sub "Repo2S3role-${AWS::StackName}"
