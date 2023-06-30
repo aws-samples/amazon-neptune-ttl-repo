@@ -33,6 +33,7 @@ class NeptuneStreamHandler(AbstractHandler):
         params = json.loads(os.environ['AdditionalParams'])
         table = params['dynamodb_table']
         neptuneEndpoint = 'https://' + params['neptune_endpoint'] + ':8182/pg/stream'
+        neptuneTTLPropertyName = params['neptune_ttl_property_name']
         
         records = stream_log[RECORDS_STR]
         
@@ -49,9 +50,9 @@ class NeptuneStreamHandler(AbstractHandler):
                     
                     if record[OPERATION_STR] == ADD_OPERATION:
                         print(str(obj_id) + " " + str(obj_type) + " " + str(key) + " " + str(val))
-                        if obj_type == "vp" and key == "TTL":
+                        if obj_type == "vp" and key == neptuneTTLPropertyName:
                             add_ttl(batch, obj_id, "vertex", val)
-                        elif obj_type == "ep" and key == "TTL": 
+                        elif obj_type == "ep" and key == neptuneTTLPropertyName: 
                             add_ttl(batch, obj_id, "edge", val)
                     yield HandlerResponse(
                         record[EVENT_ID_STR][OP_NUM_STR],
