@@ -76,7 +76,7 @@ Resources:
 
           def copy_s3_s3(s3_client, source_bucket, target_bucket, source_folder, target_folder, key):
             source_path = source_folder+"/"+key
-            target_path = target_folder+"/"_key
+            target_path = target_folder+"/"+key
             local_path = "/tmp/" + key
             s3_client.download_file(source_bucket, source_path, local_path)
             s3_client.upload_file(Bucket = target_bucket, Key = target_path, Filename = local_path, ExtraArgs={"ServerSideEncryption": "AES256"})
