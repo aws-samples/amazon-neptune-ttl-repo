@@ -23,9 +23,6 @@ Parameters:
     Description: The name of the property in Neptune that is used to denote TTL. ___ TODO _____ THIS MEANS WE CHANGE THE CODE TOO
     Type: String
     Default: 'TTL'
-  InterimDownloadToken:
-    Description: Token to be used for private download while repo is private
-    Type: String
 
 Resources:
   S3Bucket:
@@ -46,7 +43,6 @@ Resources:
     Properties:
       ServiceToken: !GetAtt Repo2S3Func.Arn
       staging_bucket: !Ref S3Bucket
-      git_token: !Ref InterimDownloadToken
 
   Repo2S3Func:
     Type: "AWS::Lambda::Function"
@@ -74,21 +70,23 @@ Resources:
             "notebook": ["TTL_Notebook.ipynb"] 
           }
 
-          def copy_s3_s3(s3_client, source_bucket, target_bucket, folder, key):
-            s3_path = folder+"/"+key
-            local_path = "/tmp/" + key
-            s3_client.download_file(source_bucket, s3_path, local_path)
-            s3_client.upload_file(Bucket = target_bucket, Key = s3_path, Filename = local_path, ExtraArgs={"ServerSideEncryption": "AES256"})
+          GIT_SOURCE="https://raw.githubusercontent.com/aws-samples/amazon-neptune-ttl-repo/main"
+          INTERIM_S3_SOURCE_BUCKET="aws-blogs-artifacts-public"
+          INTERIM_S3_SOURCE_PATH="artifacts/DBBLOG-2616"
 
-          def copy_web_s3(url, s3_client, bucket, folder, key, token):
+          def copy_s3_s3(s3_client, source_bucket, target_bucket, source_folder, target_folder, key):
+            source_path = source_folder+"/"+key
+            target_path = target_folder+"/"_key
+            local_path = "/tmp/" + key
+            s3_client.download_file(source_bucket, source_path, local_path)
+            s3_client.upload_file(Bucket = target_bucket, Key = target_path, Filename = local_path, ExtraArgs={"ServerSideEncryption": "AES256"})
+
+          def copy_web_s3(url, s3_client, bucket, folder, key):
             s3_path = folder+"/"+key
             local_path = "/tmp/" + key
             fileurl = url + "/" + folder + "/" + key
-            fields={}
-            if len(token) > 0:
-              fields['token'] = token
-            print("loading web file *" + fileurl + "* with " + str(fields))
-            the_file = http.request('GET',fileurl, fields, preload_content=False)
+            print("loading web file *" + fileurl + "*")
+            the_file = http.request('GET',fileurl, preload_content=False)
             print("Got file")
             local_file = open(local_path, 'wb')
             local_file.write(the_file.data)
@@ -103,13 +101,14 @@ Resources:
             response_data = {}
             try:
               staging_bucket = event['ResourceProperties']['staging_bucket']
-              token = event['ResourceProperties']['git_token']
               if the_event in ('Create', 'Update'):
                 s3c = boto3.client('s3')
                 print("Creating/Updating")
                 for folder in DATA_FILES:
                   for filename in DATA_FILES[folder]:
-                    copy_web_s3("https://raw.githubusercontent.com/aws-samples/amazon-neptune-ttl-repo/main", s3c, staging_bucket, folder, filename, token)
+                    #copy_web_s3(GIT_SOURCE, s3c, staging_bucket, folder, filename)
+                    copy_s3_s3(s3c, INTERIM_S3_SOURCE_BUCKET, staging_bucket, 
+                      INTERIM_S3_SOURCE_PATH + "/" + folder, folder, filename)
 
                 response_data['Data'] = 'git success'
                 cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data)
