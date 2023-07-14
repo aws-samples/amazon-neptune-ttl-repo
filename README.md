@@ -6,18 +6,22 @@ This repo is a code sample accompanying the blog post (TODO - URL). The followin
 To run this example, you need an AWS account with permission to create resources such as a Neptune cluster. 
 
 ## Provision resources 
-We provide two configurations.
+We provide two configurations. 
+
+We encourage you to review the stack with your security team prior to using it in a production environment.
 
 ### Provision New Neptune Cluster and Supporting TTL Resources
+If you do not already have a Neptune cluster, we recommend using this option. 
+
 Download a copy of the CloudFormation template (cfn/neptune_ttl_main.yaml) from this repository. Then complete the following steps:
 
 1.	On the AWS CloudFormation console, choose **Create stack**.
 2.	Choose **With new resources (standard)**.
-3.	Select U**pload a template file**.  
+3.	Select **Upload a template file**.  
 4.	Choose **Choose file** to upload the local copy of the template that you downloaded. The name of the file is neptune_ttl_main.yaml. 
 5.	Choose **Next**.
 6.	Enter a stack name of your choosing. 
-7.	In the **Parameters** section, use defaults for the remaining parameters.
+7.	In the **Parameters** section, enter a value for ApplicationID. For the remaining parameters, use defaults.
 8.	Choose **Next**.
 9.	Continue through the remaining sections.
 10.	Read and select the check boxes in the **Capabilities** section.
@@ -27,6 +31,8 @@ Download a copy of the CloudFormation template (cfn/neptune_ttl_main.yaml) from 
 This opens in your browser the Jupyter files view. 
 
 ### Provision TTL Resources for Existing Neptune Cluster
+If you already have a Neptune cluster, you may use this option. 
+
 Download a copy of the CloudFormation template (cfn/neptune_ttl_main-existing.yaml) from this repository. Then complete the following steps:
 
 1.	On the AWS CloudFormation console, choose **Create stack**.
@@ -35,7 +41,7 @@ Download a copy of the CloudFormation template (cfn/neptune_ttl_main-existing.ya
 4.	Choose **Choose file** to upload the local copy of the template that you downloaded. The name of the file is neptune_ttl_main-existing.yaml. 
 5.	Choose **Next**.
 6.	Enter a stack name of your choosing. 
-7.	In the **Parameters** section, use defaults for the remaining parameters.
+7.	In the **Parameters** section, enter an ApplicationID. Also provide details of your existing Neptune cluster by setting values for NeptuneClusterId, NeptuneClusterResourceId, NeptuneEndpoint, NeptunePort, VPC, SubnetIds, SecurityGroupIds, RouteTableIds. You may use defaults for remaining parameters.
 8.	Choose **Next**.
 9.	Continue through the remaining sections.
 10.	Read and select the check boxes in the **Capabilities** section.
@@ -43,7 +49,6 @@ Download a copy of the CloudFormation template (cfn/neptune_ttl_main-existing.ya
 12.	When the stack is complete, navigate to the **Outputs** section and follow the link for the output NeptuneSagemakerNotebook. 
 
 This opens in your browser the Jupyter files view. 
-We encourage you to review the stack with your security team prior to using it in a production environment.
 
 ## Running the Examples
 Open the TTL_Notebook.ipynb notebook in the Sagemaker notebook instance provisioned. Follow the steps to add nodes and edges with a specified TTL property to the Neptune database instance. Confirm these objects were added, then watch them expire and be deleted from the database. 
@@ -56,9 +61,6 @@ The template creates resources in services including Amazon Neptune, Amazon Dyna
 ## Clean up
 If you’re done with the solution and wish to avoid future charges, delete the CloudFormation stack. 
 
-
-
 ## License
-
 This library is licensed under the MIT-0 License. See the LICENSE file.
 
