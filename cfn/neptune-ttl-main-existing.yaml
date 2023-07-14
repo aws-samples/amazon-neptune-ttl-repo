@@ -580,6 +580,9 @@ Resources:
               - echo 'export AWS_REGION=
               - !Ref AWS::Region
               - "' >> ~/.bashrc\n"
+              - echo 'export NEPTUNE_TTL_PROPERTY_NAME=
+              - !Ref NeptuneTTLPropertyName
+              - "' >> ~/.bashrc\n"
               - aws s3 cp s3://
               - !Ref S3Bucket
               - /notebook/TTL_Notebook.ipynb /home/ec2-user/SageMaker/TTL_Notebook.ipynb
