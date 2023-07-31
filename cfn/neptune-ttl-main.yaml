@@ -20,9 +20,9 @@ Parameters:
     Type: String
     Default: LATEST
   NeptuneTTLPropertyName:
-    Description: The name of the property in Neptune that is used to denote TTL. ___ TODO _____ THIS MEANS WE CHANGE THE CODE TOO
+    Description: The name of the property in Neptune that is used to denote TTL.
     Type: String
-    Default: 'TTL'
+    Default: 'TTLBlog#TTL'
 
 Resources:
   S3Bucket:
@@ -71,8 +71,6 @@ Resources:
           }
 
           GIT_SOURCE="https://raw.githubusercontent.com/aws-samples/amazon-neptune-ttl-repo/main"
-          INTERIM_S3_SOURCE_BUCKET="aws-blogs-artifacts-public"
-          INTERIM_S3_SOURCE_PATH="artifacts/DBBLOG-2616"
 
           def copy_s3_s3(s3_client, source_bucket, target_bucket, source_folder, target_folder, key):
             source_path = source_folder+"/"+key
@@ -107,9 +105,7 @@ Resources:
                 print("Creating/Updating")
                 for folder in DATA_FILES:
                   for filename in DATA_FILES[folder]:
-                    #copy_web_s3(GIT_SOURCE, s3c, staging_bucket, folder, filename)
-                    copy_s3_s3(s3c, INTERIM_S3_SOURCE_BUCKET, staging_bucket, 
-                      INTERIM_S3_SOURCE_PATH + "/" + folder, folder, filename)
+                    copy_web_s3(GIT_SOURCE, s3c, staging_bucket, folder, filename)
 
                 response_data['Data'] = 'git success'
                 cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data)
@@ -160,11 +156,8 @@ Resources:
                   - s3:List*
                 Effect: Allow
                 Resource:
-                  # TODO - remove the aws-blogs-artifacts-public once public
                   - !Sub arn:aws:s3:::${S3Bucket}/*
                   - !Sub arn:aws:s3:::${S3Bucket}
-                  - !Sub arn:aws:s3:::aws-blogs-artifacts-public/*
-                  - !Sub arn:aws:s3:::aws-blogs-artifacts-public
             Version: "2012-10-17"
           PolicyName: !Sub "Repo2S3pol-S3-${AWS::StackName}"
       RoleName: !Sub "Repo2S3role-${AWS::StackName}"
@@ -205,6 +198,13 @@ Resources:
                 Resource: '*'
             Version: "2012-10-17"
           PolicyName: !Sub "alr-ec2-${AWS::StackName}"
+        - PolicyDocument:
+            Statement:
+              - Action: neptune-db:*
+                Effect: Allow
+                Resource: '*'
+            Version: "2012-10-17"
+          PolicyName: !Sub "alr-nep-${AWS::StackName}"
         - PolicyDocument:
             Statement:
               - Action:
@@ -392,20 +392,22 @@ Resources:
                         obj_id = r['dynamodb']['Keys']['ObjectId']['S']
                         obj_type = r['dynamodb']['OldImage']['ObjectType']['S']
                         # remove corresponding object from Neptune - vertex or edge
+                        sseq = r['dynamodb']['SequenceNumber']
                         try:
                             if obj_type == 'vertex':
-                                print('dropping ' + obj_id)
+                                print('dropping vertex' + obj_id + " for seq " + sseq)
                                 g.V(obj_id).drop().toList()
-                                print('dropped ' + obj_id)
+                                print('vertex dropped ' + obj_id+ " for seq " + sseq)
                             elif obj_type == 'edge':
-                                print('dropping ' + obj_id)
+                                print('dropping edge' + obj_id+ " for seq " + sseq)
                                 g.E(obj_id).drop().toList()
-                                print('dropped ' + obj_id)
+                                print('edge dropped ' + obj_id+ " for seq " + sseq)
                         except Exception as ex:
                             template = "An exception of type {0} occurred. Arguments:\n{1!r}"
                             message = template.format(type(ex).__name__, ex.args)
                             print("Exception processing Neptune object " + obj_id + " of type " + obj_type + " exception " + message)
 
+                # TODO - depending on nature of exceptions, either pass or fail
                 return {'statusCode': 200, 'body': json.dumps('Success')}
 
 
