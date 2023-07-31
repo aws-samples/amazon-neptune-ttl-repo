@@ -1,3 +1,5 @@
+THIS REPO IS UNDER CONSTRUCTION. CHECK BACK FOR UDPATES.
+
 ## Time-to-Live (TTL) in Amazon Neptune
 
 This repo is a code sample accompanying the blog post (TODO - URL). The following are instructions to setup the TTL sample. 
@@ -59,7 +61,15 @@ We recommend you follow along with the blog post to understand the end-to-end pr
 The template creates resources in services including Amazon Neptune, Amazon DynamoDB, AWS Step Functions, AWS Lambda, and Amazon EventBridge. Please refer to pricing guides for these services. 
 
 ## Clean up
-If you’re done with the solution and wish to avoid future charges, delete the CloudFormation stack. 
+If you’re done with the solution and wish to avoid future charges, delete the CloudFormation stack.
+
+## Limitations
+This repo is a proof of concept of the approach described in the blog post. Here are a few gaps:
+- We support TTL for property graph. We do not currently support TTL for RDF.
+- We support TTL on nodes and edges. We do not support TTL on properties.
+- We do not support modification or removal of TTL on nodes and edges.
+- The Lambda function that removes nodes and edges when they expire is not designed to handle supernodes. If you have a TTL on a node with a large number of edges, refer to discussion in our blog post for design options.
+- Error handling in the Lambda function that removes nodes and edges when they expire is POC-grade. Errors are caught and logged in CloudWatch. Errors are not sent to a queue for reprocessing. Also, the code does not distinguish the type of error: connection issues, transaction issues, timeouts and other transient conditions are treated the same as permanent conditions (e.g., the node no longer exists).
 
 ## License
 This library is licensed under the MIT-0 License. See the LICENSE file.
