@@ -5,8 +5,9 @@ Parameters:
   DBInstanceType:
     Description: Neptune DB instance type
     Type: String
-    Default: db.r5.xlarge
+    Default: db.serverless
     AllowedValues:
+    - db.serverless
     - db.r5.large
     - db.r5.xlarge
     - db.r5.2xlarge
@@ -28,14 +29,14 @@ Parameters:
     Description: Neptune query timeout (in milliseconds)
   NeptuneEnableAuditLog:
     Type: Number
-    Default: 0
+    Default: 1
     AllowedValues:
     - 0
     - 1
     Description: Enable audit log. 0 means disable and 1 means enable.
   IAMAuthEnabled:
     Type: String
-    Default: 'false'
+    Default: 'true'
     AllowedValues:
     - 'true'
     - 'false'
@@ -112,6 +113,7 @@ Resources:
         Ref: DBClusterPort
       IamAuthEnabled:
         Ref: IAMAuthEnabled
+      StorageEncrypted: true
       Tags:
       - Key: Name
         Value: Neptune DB cluster
