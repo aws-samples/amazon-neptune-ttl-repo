@@ -50,7 +50,17 @@ Parameters:
     Description: Application ID
     Type: String
     AllowedPattern: "[-a-z0-9]+"
-    MaxLength: 50
+    MaxLength: 
+  MinNCUs:
+    MinValue: 1
+    MaxValue: 128
+    Type: Number
+    Default: 2.5
+  MaxNCUs:
+    MinValue: 1
+    MaxValue: 128
+    Type: Number
+    Default: 128
 Conditions:
   CreateDBReplicaInstance:
     Fn::Not:
@@ -114,6 +124,9 @@ Resources:
       IamAuthEnabled:
         Ref: IAMAuthEnabled
       StorageEncrypted: true
+      ServerlessScalingConfiguration:
+          MinCapacity: !Ref MinNCUs
+          MaxCapacity: !Ref MaxNCUs
       Tags:
       - Key: Name
         Value: Neptune DB cluster
