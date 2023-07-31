@@ -50,7 +50,7 @@ Parameters:
     Description: Application ID
     Type: String
     AllowedPattern: "[-a-z0-9]+"
-    MaxLength: 
+    MaxLength: 50
   MinNCUs:
     MinValue: 1
     MaxValue: 128
