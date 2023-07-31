@@ -5,9 +5,8 @@ Parameters:
   DBInstanceType:
     Description: Neptune DB instance type
     Type: String
-    Default: db.serverless
+    Default: db.r5.xlarge
     AllowedValues:
-    - db.serverless
     - db.r5.large
     - db.r5.xlarge
     - db.r5.2xlarge
@@ -51,16 +50,6 @@ Parameters:
     Type: String
     AllowedPattern: "[-a-z0-9]+"
     MaxLength: 50
-  MinNCUs:
-    MinValue: 1
-    MaxValue: 128
-    Type: Number
-    Default: 2.5
-  MaxNCUs:
-    MinValue: 1
-    MaxValue: 128
-    Type: Number
-    Default: 128
 Conditions:
   CreateDBReplicaInstance:
     Fn::Not:
@@ -110,6 +99,7 @@ Resources:
   NeptuneDBCluster:
     Type: AWS::Neptune::DBCluster
     Properties:
+      EngineVersion: 1.2
       DBSubnetGroupName:
         Ref: NeptuneDBSubnetGroup
       VpcSecurityGroupIds:
@@ -124,9 +114,6 @@ Resources:
       IamAuthEnabled:
         Ref: IAMAuthEnabled
       StorageEncrypted: true
-      ServerlessScalingConfiguration:
-          MinCapacity: !Ref MinNCUs
-          MaxCapacity: !Ref MaxNCUs
       Tags:
       - Key: Name
         Value: Neptune DB cluster
