@@ -323,6 +323,8 @@ Resources:
           ZipFile: |
             from __future__ import print_function  # Python 2/3 compatibility
 
+            from neptune_python_utils.endpoints import Endpoints
+            from neptune_python_utils.gremlin_utils import GremlinUtils
             from gremlin_python import statics
             from gremlin_python.structure.graph import Graph
             from gremlin_python.driver import client
@@ -401,10 +403,11 @@ Resources:
             def lambda_handler(event, context):
 
                 # obtain Neptune connection
-                graph = Graph()
-                print('**Connecting + *' + neptuneEndpoint + '*')
-                drc = DriverRemoteConnection(neptuneEndpoint, 'g')
-                g = graph.traversal().withRemote(drc)
+                endpoints = Endpoints(neptune_endpoint=os.environ['neptunedb'])
+                GremlinUtils.init_statics(globals())
+                gremlin_utils = GremlinUtils(endpoints)
+                conn = gremlin_utils.remote_connection()
+                g = gremlin_utils.traversal_source(connection=conn)
                 print(event)
 
                 # validate Dynamo streams input - should be list of records
@@ -482,9 +485,11 @@ Resources:
         CreateCloudWatchAlarm: 'false'
         LambdaS3Bucket: !Ref S3Bucket
         LambdaS3Key: 'layer/neptune-streams-layer.zip'
+        IAMAuthEnabledOnSourceStream: 'true'
         MaxPollingWaitTime: 5
         StepFunctionFallbackPeriod: 1
         StepFunctionFallbackPeriodUnit: minute
+        StreamDBClusterResourceId: !Ref NeptuneClusterResourceId
       TimeoutInMinutes: '20'
       Tags:
       - Key: InfrastructureID
@@ -569,7 +574,7 @@ Resources:
               - sudo -u ec2-user -i << 'EOF'
               - "\n"
               - echo 'export GRAPH_NOTEBOOK_AUTH_MODE=
-              - 'DEFAULT'
+              - 'IAM'
               - "' >> ~/.bashrc\n"
               - echo 'export GRAPH_NOTEBOOK_HOST=
               - !Ref NeptuneEndpoint
