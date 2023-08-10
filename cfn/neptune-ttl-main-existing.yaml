@@ -473,7 +473,7 @@ Resources:
             - Ref: NeptuneEndpoint
             - ":"
             - Ref: NeptunePort
-            - "/gremlin/stream"
+            - "/pg/stream"
         VPC: !Ref VPC
         SubnetIds: !Join 
           - ','

@@ -492,7 +492,7 @@ Resources:
             - Fn::GetAtt:
               - NeptuneStack
               - Outputs.NeptuneDBClusterPort
-            - "/gremlin/stream"
+            - "/pg/stream"
         VPC:
           Fn::GetAtt:
           - NetworkStack
