@@ -367,6 +367,13 @@ Resources:
             neptuneEndpoint = 'wss://' + os.environ['neptunedb'] + ':8182/gremlin'
             print('neptuneEndpoint ' + neptuneEndpoint)
 
+            # obtain Neptune connection
+            endpoints = Endpoints(neptune_endpoint=os.environ['neptunedb'])
+            GremlinUtils.init_statics(globals())
+            gremlin_utils = GremlinUtils(endpoints)
+            conn = gremlin_utils.remote_connection()
+            g = gremlin_utils.traversal_source(connection=conn)
+
             stop_on_error = False
             if 'stop_on_error' in os.environ and os.environ["stop_on_error"]=='true':
                 stop_on_error = True
@@ -410,41 +417,64 @@ Resources:
             }
             '''
 
+            def build_do_list(event):
+                do_list = {'nodes': [], 'edges': []}}
+                for r in event['Records']:
+                    # consider only records REMOVEd by dynamodb itself as part of automatic TTL mechanism
+                    if r['eventName'] == 'REMOVE' and 'userIdentity' in r and r['userIdentity']['principalId'] =='dynamodb.amazonaws.com':
+                        obj_id = r['dynamodb']['Keys']['ObjectId']['S']
+                        obj_type = r['dynamodb']['OldImage']['ObjectType']['S']
+                        sseq = r['dynamodb']['SequenceNumber']
+                        if obj_type == 'vertex':
+                            do_list['nodes'].append({'id': obj_id, 'seq': sseq})
+                        elif obj_type == 'edge':
+                            do_list['edges'].append({'id': obj_id, 'seq': sseq})
+                            
+                # We will have this do list in our log. If timeout or error out before getting to all of them, 
+                # we have a log of the list
+                print("Do list")
+                print(do_list)
+                return do_list
+
             def lambda_handler(event, context):
-              # obtain Neptune connection
-              endpoints = Endpoints(neptune_endpoint=os.environ['neptunedb'])
-              GremlinUtils.init_statics(globals())
-              gremlin_utils = GremlinUtils(endpoints)
-              conn = gremlin_utils.remote_connection()
-              g = gremlin_utils.traversal_source(connection=conn)
+                do_list = None
+                if 'Records' in event:
+                    do_list = build_do_list(event)
+                elif 'dolist' in event:
+                    do_list = event['dolist']
+                else:
+                    raise Exception("Invalid function input")
+                    
+                for e in dolist['edges']:
+                    try:
+                        print('dropping edge' + str(e))
+                        g.E(e['id']).drop().toList()
+                        print('edge dropped ' +str(e))
+                    except Exception as ex:
+                        template = "An exception of type {0} occurred. Arguments:\n{1!r}"
+                        message = template.format(type(ex).__name__, ex.args)
+                        print("Exception processing Neptune object " + obj_id + " of type " + obj_type + " exception " + message + " are we stopping? " + str(stop_on_error))
+                        if stop_on_error:
+                            return { 'statusCode': 500, 'body': json.dumps('Error')}
 
-              # validate Dynamo streams input - should be list of records
-              if not 'Records' in event:
-                  raise Exception('No Records in event')
-              for r in event['Records']:
-                  # consider only records REMOVEd by dynamodb itself as part of automatic TTL mechanism
-                  if r['eventName'] == 'REMOVE' and 'userIdentity' in r and r['userIdentity']['principalId'] =='dynamodb.amazonaws.com':
-                      obj_id = r['dynamodb']['Keys']['ObjectId']['S']
-                      obj_type = r['dynamodb']['OldImage']['ObjectType']['S']
-                      # remove corresponding object from Neptune - vertex or edge
-                      sseq = r['dynamodb']['SequenceNumber']
-                      try:
-                          if obj_type == 'vertex':
-                              print('dropping vertex' + obj_id + " for seq " + sseq)
-                              g.V(obj_id).drop().toList()
-                              print('vertex dropped ' + obj_id+ " for seq " + sseq)
-                          elif obj_type == 'edge':
-                              print('dropping edge' + obj_id+ " for seq " + sseq)
-                              g.E(obj_id).drop().toList()
-                              print('edge dropped ' + obj_id+ " for seq " + sseq)
-                      except Exception as ex:
-                          template = "An exception of type {0} occurred. Arguments:\n{1!r}"
-                          message = template.format(type(ex).__name__, ex.args)
-                          print("Exception processing Neptune object " + obj_id + " of type " + obj_type + " exception " + message + " are we stopping? " + str(stop_on_error))
-                          if stop_on_error:
-                              return { 'statusCode': 500, 'body': json.dumps('Error')}
+                for n in dolist['nodes']:
+                    try:
+                        print('dropping node' + str(n))
+                        # see https://stackoverflow.com/questions/63354247/deleting-vertex-with-a-degree-of-millions-scale-from-janusgraph
+                        # remove edges in chunks
+                        while g.V(n['id']).outE().limit(1).hasNext():
+                            g.V(n['id']).outE().limit(10000).drop().iterate()
+                        g.V(n['id']).drop().toList()
+                        print('node dropped ' +str(n))
+                    except Exception as ex:
+                        template = "An exception of type {0} occurred. Arguments:\n{1!r}"
+                        message = template.format(type(ex).__name__, ex.args)
+                        print("Exception processing Neptune object " + obj_id + " of type " + obj_type + " exception " + message + " are we stopping? " + str(stop_on_error))
+                        if stop_on_error:
+                            return { 'statusCode': 500, 'body': json.dumps('Error')}
 
-              return {'statusCode': 200, 'body': json.dumps('Success')} 
+                return {'statusCode': 200, 'body': json.dumps('Success')} 
+
 
 
         Role: !GetAtt
