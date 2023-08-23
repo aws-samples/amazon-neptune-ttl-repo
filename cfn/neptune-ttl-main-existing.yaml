@@ -238,7 +238,10 @@ Resources:
           PolicyName: !Sub "alr-ec2-${AWS::StackName}"
         - PolicyDocument:
             Statement:
-              - Action: neptune-db:*
+              - Action: 
+                - neptune-db:ReadDataViaQuery
+                - neptune-db:WriteDataViaQuery
+                - neptune-db:DeleteDataViaQuery
                 Effect: Allow
                 Resource: '*'
             Version: "2012-10-17"
@@ -246,17 +249,10 @@ Resources:
         - PolicyDocument:
             Statement:
               - Action:
-                  - dynamodb:*
-                Effect: Allow
-                Resource: !GetAtt
-                  - DynamoTTLTable
-                  - Arn
-            Version: "2012-10-17"
-          PolicyName: !Sub "alr-ddb-${AWS::StackName}"
-        - PolicyDocument:
-            Statement:
-              - Action:
-                  - dynamodb:*
+                - dynamodb:DescribeStream
+                - dynamodb:GetRecords
+                - dynamodb:GetShardIterator
+                - dynamodb:ListStreams  
                 Effect: Allow
                 Resource: !GetAtt
                   - DynamoTTLTable
@@ -343,10 +339,38 @@ Resources:
             table because it has expired based on TTL value. In Neptune, there is a vertex or edge -- having that ObjectType -- with that ObjectId,
             and it was meant to expire at TTL too. So we drop that object here.
             In effect, we use TTL expiration in Dynamo guide us to expire in Neptune.
+
+            A note about error handling in this function. 
+            Errors are caught and logged in CloudWatch. Errors are not sent to a queue for reprocessing. 
+            Also, the code does not distinguish the type of error: connection issues, transaction issues, timeouts 
+            and other transient conditions are treated the same as permanent conditions (e.g., the node no longer exists).
+
+            Refer to https://docs.aws.amazon.com/neptune/latest/userguide/lambda-functions-examples.html#lambda-functions-examples-python. This shows
+            a code pattern that distinguishes retriable from non-retriable errors.
+
+            You may add an environment variable stop_on_error with value true to force the function to exit on an error.
+            By default, it keeps going, logging errors to CloudWatch log stream.
+
+            This function is triggered by Dynamo Streams. If we fail to
+            handle the Dynamo Streams events, Dynamo Streams will NOT resend the events for us to retry later. So we
+            recommend you monitor this function for errors and have a process in place to address errors. Errors are
+            unlikely to occur, but when they do, you can use the function logs in CloudWatch to determine what failed.
+            The function logs the complete Dynamo Streams event. It also logs each TTL removal attempted. And it
+            logs whether the removal was successful or had an error. If the function should time out, the logs
+            will also show that.
+
+            If you configure the Dynamo Streams batch size appropriately, timeouts will be unlikely.  One possible cause
+            for a timeout is removing a node having a very large number of edges. Such a node is called a "supernode." This function
+            does not have special logic for supernodes. For more discussion, refer to the blog post.
             '''
 
             neptuneEndpoint = 'wss://' + os.environ['neptunedb'] + ':8182/gremlin'
             print('neptuneEndpoint ' + neptuneEndpoint)
+
+            stop_on_error = False
+            if 'stop_on_error' in os.environ and os.environ["stop_on_error"]=='true':
+                stop_on_error = True
+            print('stop on error ' + str(stop_on_error))
 
             '''
             Here is what the dynamo event looks like:
@@ -386,56 +410,41 @@ Resources:
             }
             '''
 
-            '''
-            A note on robustness and error handling. This function is triggered by Dynamo Streams. If we fail to
-            handle the Dynamo Streams events, Dynamo Streams will NOT resend the events for us to retry later. So we
-            recommend you monitor this function for errors and have a process in place to address errors. Errors are
-            unlikely to occur, but when they do, you can use the function logs in CloudWatch to determine what failed.
-            The function logs the complete Dynamo Streams event. It also logs each TTL removal attempted. And it
-            logs whether the removal was successful or had an error. If the function should time out, the logs
-            will also show that.
-
-            If you configure the Dynamo Streams batch size appropriately, timeouts will be unlikely.  One possible cause
-            for a timeout is removing a node having a very large number of edges. Such a node is called a "supernode." This function
-            does not have special logic for supernodes. For more discussion, refer to the blog post.
-            '''
-
             def lambda_handler(event, context):
+              # obtain Neptune connection
+              endpoints = Endpoints(neptune_endpoint=os.environ['neptunedb'])
+              GremlinUtils.init_statics(globals())
+              gremlin_utils = GremlinUtils(endpoints)
+              conn = gremlin_utils.remote_connection()
+              g = gremlin_utils.traversal_source(connection=conn)
 
-                # obtain Neptune connection
-                endpoints = Endpoints(neptune_endpoint=os.environ['neptunedb'])
-                GremlinUtils.init_statics(globals())
-                gremlin_utils = GremlinUtils(endpoints)
-                conn = gremlin_utils.remote_connection()
-                g = gremlin_utils.traversal_source(connection=conn)
-                print(event)
+              # validate Dynamo streams input - should be list of records
+              if not 'Records' in event:
+                  raise Exception('No Records in event')
+              for r in event['Records']:
+                  # consider only records REMOVEd by dynamodb itself as part of automatic TTL mechanism
+                  if r['eventName'] == 'REMOVE' and 'userIdentity' in r and r['userIdentity']['principalId'] =='dynamodb.amazonaws.com':
+                      obj_id = r['dynamodb']['Keys']['ObjectId']['S']
+                      obj_type = r['dynamodb']['OldImage']['ObjectType']['S']
+                      # remove corresponding object from Neptune - vertex or edge
+                      sseq = r['dynamodb']['SequenceNumber']
+                      try:
+                          if obj_type == 'vertex':
+                              print('dropping vertex' + obj_id + " for seq " + sseq)
+                              g.V(obj_id).drop().toList()
+                              print('vertex dropped ' + obj_id+ " for seq " + sseq)
+                          elif obj_type == 'edge':
+                              print('dropping edge' + obj_id+ " for seq " + sseq)
+                              g.E(obj_id).drop().toList()
+                              print('edge dropped ' + obj_id+ " for seq " + sseq)
+                      except Exception as ex:
+                          template = "An exception of type {0} occurred. Arguments:\n{1!r}"
+                          message = template.format(type(ex).__name__, ex.args)
+                          print("Exception processing Neptune object " + obj_id + " of type " + obj_type + " exception " + message + " are we stopping? " + str(stop_on_error))
+                          if stop_on_error:
+                              return { 'statusCode': 500, 'body': json.dumps('Error')}
 
-                # validate Dynamo streams input - should be list of records
-                if not 'Records' in event:
-                    raise Exception('No Records in event')
-                for r in event['Records']:
-                    # consider only records REMOVEd by dynamodb itself as part of automatic TTL mechanism
-                    if r['eventName'] == 'REMOVE' and 'userIdentity' in r and r['userIdentity']['principalId'] =='dynamodb.amazonaws.com':
-                        obj_id = r['dynamodb']['Keys']['ObjectId']['S']
-                        obj_type = r['dynamodb']['OldImage']['ObjectType']['S']
-                        # remove corresponding object from Neptune - vertex or edge
-                        sseq = r['dynamodb']['SequenceNumber']
-                        try:
-                            if obj_type == 'vertex':
-                                print('dropping vertex' + obj_id + " for seq " + sseq)
-                                g.V(obj_id).drop().toList()
-                                print('vertex dropped ' + obj_id+ " for seq " + sseq)
-                            elif obj_type == 'edge':
-                                print('dropping edge' + obj_id+ " for seq " + sseq)
-                                g.E(obj_id).drop().toList()
-                                print('edge dropped ' + obj_id+ " for seq " + sseq)
-                        except Exception as ex:
-                            template = "An exception of type {0} occurred. Arguments:\n{1!r}"
-                            message = template.format(type(ex).__name__, ex.args)
-                            print("Exception processing Neptune object " + obj_id + " of type " + obj_type + " exception " + message)
-
-                # TODO - depending on nature of exceptions, either pass or fail
-                return {'statusCode': 200, 'body': json.dumps('Success')}
+              return {'statusCode': 200, 'body': json.dumps('Success')} 
 
 
         Role: !GetAtt
