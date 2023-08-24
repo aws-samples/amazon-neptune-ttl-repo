@@ -5,14 +5,31 @@ Parameters:
   DBInstanceType:
     Description: Neptune DB instance type
     Type: String
-    Default: db.r5.xlarge
+    Default: db.serverless
     AllowedValues:
     - db.r5.large
     - db.r5.xlarge
     - db.r5.2xlarge
     - db.r5.4xlarge
     - db.r5.8xlarge
+    - db.serverless
     ConstraintDescription: Must be a valid Neptune instance type.
+  MinNCUs:
+    Description: Min NCUs to be set on the Neptune cluster(Should be less than or
+      equal to MaxNCUs). Required if DBInstance type is db.serverless
+    Default: 1
+    Type: Number
+    MinValue: 1
+    MaxValue: 128
+    ConstraintDescription: Must be a valid value between 1 and 128.
+  MaxNCUs:
+    Description: Max NCUs to be set on the Neptune cluster(Should be greater than
+      or equal to MinNCUs). Required if DBInstance type is db.serverless
+    Default: 128
+    Type: Number
+    MinValue: 1
+    MaxValue: 128
+    ConstraintDescription: Must be a valid value between 1 and 128.
   DBReplicaIdentifierSuffix:
     Description: 'OPTIONAL: The ID suffix for the Neptune replica to use. Empty means
       no read replica.'
@@ -100,6 +117,11 @@ Resources:
     Type: AWS::Neptune::DBCluster
     Properties:
       EngineVersion: 1.2
+      ServerlessScalingConfiguration:
+        MinCapacity:
+          Ref: MinNCUs
+        MaxCapacity:
+          Ref: MaxNCUs
       DBSubnetGroupName:
         Ref: NeptuneDBSubnetGroup
       VpcSecurityGroupIds:
@@ -119,6 +141,7 @@ Resources:
         Value: Neptune DB cluster
     DependsOn:
     - NeptuneDBClusterParameterGroup
+    - NeptuneDBSubnetGroup
   NeptuneDBInstance:
     Type: AWS::Neptune::DBInstance
     Properties:
