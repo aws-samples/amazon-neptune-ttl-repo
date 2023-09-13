@@ -62,6 +62,9 @@ Parameters:
   DynamoStreamsStartingPosition:
     Type: String
     Default: LATEST
+  DynamoStreamsRetries:
+    Type: Number
+    Default: 2
 
 Resources:
   S3Bucket:
@@ -282,6 +285,8 @@ Resources:
         - DynamoTTLTable
         - StreamArn
       StartingPosition: !Ref DynamoStreamsStartingPosition
+      BisectBatchOnFunctionError: true
+      MaximumRetryAttempts: !Ref DynamoStreamsRetries
 
   DynamoTTLTable:
     Type: AWS::DynamoDB::Table
@@ -317,22 +322,33 @@ Resources:
         Handler: index.lambda_handler
         Code:
           ZipFile: |
-            from __future__ import print_function  # Python 2/3 compatibility
+            import os, sys, backoff, math
+            from random import randint
+            from gremlin_python import statics
+            from gremlin_python.driver.driver_remote_connection import DriverRemoteConnection
+            from gremlin_python.driver.protocol import GremlinServerError
+            from gremlin_python.driver import serializer
+            from gremlin_python.process.anonymous_traversal import traversal
+            from gremlin_python.process.graph_traversal import __
+            from gremlin_python.process.strategies import *
+            from gremlin_python.process.traversal import T
+            from aiohttp.client_exceptions import ClientConnectorError
+            from botocore.auth import SigV4Auth
+            from botocore.awsrequest import AWSRequest
+            from botocore.credentials import ReadOnlyCredentials
+            from types import SimpleNamespace
 
             from neptune_python_utils.endpoints import Endpoints
             from neptune_python_utils.gremlin_utils import GremlinUtils
-            from gremlin_python import statics
             from gremlin_python.structure.graph import Graph
             from gremlin_python.driver import client
-            from gremlin_python.process.graph_traversal import __
-            from gremlin_python.process.strategies import *
-            from gremlin_python.driver.driver_remote_connection import DriverRemoteConnection
-            from gremlin_python.process.traversal import T
 
             import json
-            import sys
-            import os
             import subprocess
+
+            import logging
+            logger = logging.getLogger()
+            logger.setLevel(logging.INFO)
 
             '''
             Lambda function that is triggered by Dynamo DB streams when a record of form (ObjectId, ObjectType, TTL) is removed from DynamoDB
@@ -340,37 +356,26 @@ Resources:
             and it was meant to expire at TTL too. So we drop that object here.
             In effect, we use TTL expiration in Dynamo guide us to expire in Neptune.
 
-            A note about error handling in this function. 
-            Errors are caught and logged in CloudWatch. Errors are not sent to a queue for reprocessing. 
-            Also, the code does not distinguish the type of error: connection issues, transaction issues, timeouts 
-            and other transient conditions are treated the same as permanent conditions (e.g., the node no longer exists).
+            Error handling in the Lambda function that removes nodes and edges when they expire can be enhanced. Here is current behavior:
+                * The function logs in CloudWatch all attempted drops. Errors are caught and logged in CloudWatch.
+                * The function addresses errors calling Neptune by following retry logic discussed in [https://docs.aws.amazon.com/neptune/latest/userguide/lambda-functions-examples.html#lambda-functions-examples-python](https://docs.aws.amazon.com/neptune/latest/userguide/lambda-functions-examples.html#lambda-functions-examples-python). It distinguishes retriable from non-retriable errors. 
+                * The function's trigger is DynamoDB streams. When the function returns an error, the Lambda service follows retry logic.  See [https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Streams.Lambda.html](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Streams.Lambda.html) and [https://docs.aws.amazon.com/lambda/latest/dg/with-ddb.html#services-dynamodb-eventsourcemapping](https://docs.aws.amazon.com/lambda/latest/dg/with-ddb.html#services-dynamodb-eventsourcemapping) for documentation on Lambda triggers for DynamoDB streams. Note:
+                  * Lambda retries a finite number of times the Lambda function on error. 
+                  * Lambda splits/bisects the batch into two on error. This is useful when there is too much work to do in the batch or if part of the batch is causing an error.  
 
-            Refer to https://docs.aws.amazon.com/neptune/latest/userguide/lambda-functions-examples.html#lambda-functions-examples-python. This shows
-            a code pattern that distinguishes retriable from non-retriable errors.
+            There are two levels of retries: 
+                * The Lambda function itself retries a drop several times with backoff. It also reconnected a failed connection to Neptune.
+                * The Lambda service retries a failed batch from DynamoDB streams, as mentioned above.
 
-            You may add an environment variable stop_on_error with value true to force the function to exit on an error.
-            By default, it keeps going, logging errors to CloudWatch log stream.
+            If there is a serious failure such that Neptune cannot drop objects, you can find a record of what was ATTEMPTED in the CloudWatch log group for this function. We recommend searching the log group for two strings:
+                * _NODELOG_
+                * _EDGELOG_
 
-            This function is triggered by Dynamo Streams. If we fail to
-            handle the Dynamo Streams events, Dynamo Streams will NOT resend the events for us to retry later. So we
-            recommend you monitor this function for errors and have a process in place to address errors. Errors are
-            unlikely to occur, but when they do, you can use the function logs in CloudWatch to determine what failed.
-            The function logs the complete Dynamo Streams event. It also logs each TTL removal attempted. And it
-            logs whether the removal was successful or had an error. If the function should time out, the logs
-            will also show that.
+            Here are enhancements you might consider:
+            * Customize trigger parameters discussed here [https://docs.aws.amazon.com/lambda/latest/dg/with-ddb.html#services-ddb-params](https://docs.aws.amazon.com/lambda/latest/dg/with-ddb.html#services-ddb-params). 
+            In particular, set an SQS queue or SNS topic for discarded streams records. 
 
-            If you configure the Dynamo Streams batch size appropriately, timeouts will be unlikely.  One possible cause
-            for a timeout is removing a node having a very large number of edges. Such a node is called a "supernode." This function
-            does not have special logic for supernodes. For more discussion, refer to the blog post.
             '''
-
-            neptuneEndpoint = 'wss://' + os.environ['neptunedb'] + ':8182/gremlin'
-            print('neptuneEndpoint ' + neptuneEndpoint)
-
-            stop_on_error = False
-            if 'stop_on_error' in os.environ and os.environ["stop_on_error"]=='true':
-                stop_on_error = True
-            print('stop on error ' + str(stop_on_error))
 
             '''
             Here is what the dynamo event looks like:
@@ -410,41 +415,170 @@ Resources:
             }
             '''
 
-            def lambda_handler(event, context):
-              # obtain Neptune connection
-              endpoints = Endpoints(neptune_endpoint=os.environ['neptunedb'])
-              GremlinUtils.init_statics(globals())
-              gremlin_utils = GremlinUtils(endpoints)
-              conn = gremlin_utils.remote_connection()
-              g = gremlin_utils.traversal_source(connection=conn)
+            '''
+            Error handling
+            '''
 
-              # validate Dynamo streams input - should be list of records
-              if not 'Records' in event:
-                  raise Exception('No Records in event')
-              for r in event['Records']:
-                  # consider only records REMOVEd by dynamodb itself as part of automatic TTL mechanism
-                  if r['eventName'] == 'REMOVE' and 'userIdentity' in r and r['userIdentity']['principalId'] =='dynamodb.amazonaws.com':
-                      obj_id = r['dynamodb']['Keys']['ObjectId']['S']
-                      obj_type = r['dynamodb']['OldImage']['ObjectType']['S']
-                      # remove corresponding object from Neptune - vertex or edge
-                      sseq = r['dynamodb']['SequenceNumber']
-                      try:
-                          if obj_type == 'vertex':
-                              print('dropping vertex' + obj_id + " for seq " + sseq)
-                              g.V(obj_id).drop().toList()
-                              print('vertex dropped ' + obj_id+ " for seq " + sseq)
-                          elif obj_type == 'edge':
-                              print('dropping edge' + obj_id+ " for seq " + sseq)
-                              g.E(obj_id).drop().toList()
-                              print('edge dropped ' + obj_id+ " for seq " + sseq)
-                      except Exception as ex:
-                          template = "An exception of type {0} occurred. Arguments:\n{1!r}"
-                          message = template.format(type(ex).__name__, ex.args)
-                          print("Exception processing Neptune object " + obj_id + " of type " + obj_type + " exception " + message + " are we stopping? " + str(stop_on_error))
-                          if stop_on_error:
-                              return { 'statusCode': 500, 'body': json.dumps('Error')}
+            # From https://docs.aws.amazon.com/neptune/latest/userguide/lambda-functions-examples.html#lambda-functions-examples-python
+            reconnectable_err_msgs = [ 
+                'ReadOnlyViolationException',
+                'Server disconnected',
+                'Connection refused',
+                'Connection was already closed',
+                'Connection was closed by server',
+                'Failed to connect to server: HTTP Error code 403 - Forbidden'
+            ]
+            retriable_err_msgs = ['ConcurrentModificationException'] + reconnectable_err_msgs
+            network_errors = [OSError, ClientConnectorError]
+            retriable_errors = [GremlinServerError, RuntimeError, Exception] + network_errors    
 
-              return {'statusCode': 200, 'body': json.dumps('Success')} 
+            def is_retriable_error(e):
+                is_retriable = False
+                err_msg = str(e)
+                logger.error(e)
+                logger.info("Checking " + err_msg)
+                
+                if isinstance(e, tuple(network_errors)):
+                    is_retriable = True
+                else:
+                    is_retriable = any(retriable_err_msg in err_msg for retriable_err_msg in retriable_err_msgs)
+                
+                return is_retriable
+
+            def is_non_retriable_error(e):      
+                return not is_retriable_error(e)
+                
+            def is_reconnectable_error(e):
+                is_reconnectable = False
+
+                err_msg = str(e)
+                
+                if isinstance(e, tuple(network_errors)):
+                    is_reconnectable = True
+                else:
+                    is_reconnectable = any(reconnectable_err_msg in err_msg for reconnectable_err_msg in reconnectable_err_msgs)
+                return is_reconnectable        
+
+            def reset_connection_if_connection_issue(params):
+                
+                e = sys.exc_info()[1]
+                is_reconnectable = is_reconnectable_error(e)
+
+                if is_reconnectable:
+                    global conn
+                    global g
+                    conn.close()
+                    conn = create_remote_connection()
+                    g = create_graph_traversal_source(conn)
+
+
+            '''
+            Connect
+            '''
+            def create_graph_traversal_source(conn):
+                return traversal().withRemote(conn)
+
+            def create_remote_connection():
+                neptuneEndpoint = 'wss://' + os.environ['neptunedb'] + ':8182/gremlin'
+                logger.info('neptuneEndpoint ' + neptuneEndpoint)
+                
+                # obtain Neptune connection
+                endpoints = Endpoints(neptune_endpoint=os.environ['neptunedb'])
+                GremlinUtils.init_statics(globals())
+                gremlin_utils = GremlinUtils(endpoints)
+                conn = gremlin_utils.remote_connection()
+                return conn
+
+
+            conn = None
+            g = None
+            try:
+                conn = create_remote_connection()
+                g = create_graph_traversal_source(conn)
+            except Exception as ex:
+                template = "Neptune connect exception of type {0} occurred. Arguments:\n{1!r}"
+                message = template.format(type(ex).__name__, ex.args)
+                logger.error("Exception processing Neptune object " + message)
+
+            ''' 
+            Drops
+            '''
+
+            EDGE_CHUNK_SIZE=10000
+            @backoff.on_exception(backoff.constant,
+                tuple(retriable_errors),
+                max_tries=5,
+                jitter=None,
+                giveup=is_non_retriable_error,
+                on_backoff=reset_connection_if_connection_issue,
+                interval=1)
+            def drop_query(**kwargs):
+                try:
+                    if 'edge' in kwargs:
+                        edge = kwargs['edge']
+                        logger.info('dropping edge' + str(edge))
+                        g.E(edge['id']).drop().toList()
+                        logger.info('edge dropped' + str(edge))
+                    elif 'node' in kwargs:
+                        node = kwargs['node']
+                        logger.info('dropping node' + str(node))
+                        while g.V(node['id']).outE().limit(1).hasNext():
+                            logger.info("dropping next chunk " + str(node))
+                            g.V(node['id']).outE().limit(EDGE_CHUNK_SIZE).drop().iterate()
+                        g.V(node['id']).drop().toList()
+                        logger.info('node dropped' + str(node))
+                except Exception as ex:
+                    template = "An exception of type {0} occurred. Arguments:\n{1!r}"
+                    message = template.format(type(ex).__name__, ex.args)
+                    can_retry = is_retriable_error(ex)
+                    can_recon = is_reconnectable_error(ex)
+                    error_detail = [kwargs,message, can_retry, can_recon]
+                    logger.error("Exception processing Neptune object " + str(error_detail))
+                    raise
+                
+                return "ok"
+
+            def build_do_list(event):
+                do_list = {'nodes': [], 'edges': []}
+                for r in event['Records']:
+                    # consider only records REMOVEd by dynamodb itself as part of automatic TTL mechanism
+                    if r['eventName'] == 'REMOVE' and 'userIdentity' in r and r['userIdentity']['principalId'] =='dynamodb.amazonaws.com':
+                        obj_id = r['dynamodb']['Keys']['ObjectId']['S']
+                        obj_type = r['dynamodb']['OldImage']['ObjectType']['S']
+                        sseq = r['dynamodb']['SequenceNumber']
+                        if obj_type == 'vertex':
+                            do_list['nodes'].append({'id': obj_id, 'seq': sseq})
+                        elif obj_type == 'edge':
+                            do_list['edges'].append({'id': obj_id, 'seq': sseq})
+
+                # We will have this do list in our log. If timeout or error out before getting to all of them, 
+                # we have a log of the list
+                if len(do_list['nodes']) > 0:
+                    logger.info("_NODELOG_ " + str(do_list['nodes']) )
+                if len(do_list['edges']) > 0:
+                    logger.info("_EDGELOG_ " + str(do_list['edges']) )
+                return do_list
+                
+            def do_lambda_handler(event, context):
+                do_list = None
+                if 'Records' in event:
+                    do_list = build_do_list(event)
+                elif 'dolist' in event:
+                    do_list = event['dolist']
+                else:
+                    raise Exception("Invalid function input")
+                    
+                for e in do_list['edges']:
+                    drop_query(edge=e)
+                for n in do_list['nodes']:
+                    drop_query(node=n)
+
+                # any errors that fall through lead to an exception, which force a retry
+                
+                # no errors, return success
+                logger.info("Returning success from lambda")
+                return {'statusCode': 200, 'body': json.dumps('Success')} 
+
 
 
         Role: !GetAtt
