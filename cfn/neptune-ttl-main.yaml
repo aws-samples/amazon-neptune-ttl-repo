@@ -555,12 +555,12 @@ Resources:
                 logger.info("Returning success from lambda")
                 return {'statusCode': 200, 'body': json.dumps('Success')} 
 
-def lambda_handler(event, context):
-    try:
-        return do_lambda_handler(event, context)
-    except:
-        logger.info("Returning error from lambda")
-        raise    
+            def lambda_handler(event, context):
+                try:
+                    return do_lambda_handler(event, context)
+                except:
+                    logger.info("Returning error from lambda")
+                    raise    
 
 
         Role: !GetAtt
