@@ -69,7 +69,26 @@ This repo is a proof of concept of the approach described in the blog post. Here
 - We support TTL on nodes and edges. We do not support TTL on properties.
 - We do not support modification or removal of TTL on nodes and edges.
 - The Lambda function that removes nodes and edges when they expire is not designed to handle supernodes. If you have a TTL on a node with a large number of edges, refer to discussion in our blog post for design options.
-- Error handling in the Lambda function that removes nodes and edges when they expire is POC-grade. Errors are caught and logged in CloudWatch. Errors are not sent to a queue for reprocessing. Also, the code does not distinguish the type of error: connection issues, transaction issues, timeouts and other transient conditions are treated the same as permanent conditions (e.g., the node no longer exists).
+
+## Error Handling
+Here is the current behavior of error handling in DynamoStreamsToNeptuneLambda, the Lambda function that removes nodes and edges when they expire.
+- The function logs in CloudWatch all attempted drops. Errors are caught and logged in CloudWatch.
+- The function addresses errors calling Neptune by following retry logic discussed in [https://docs.aws.amazon.com/neptune/latest/userguide/lambda-functions-examples.html#lambda-functions-examples-python](https://docs.aws.amazon.com/neptune/latest/userguide/lambda-functions-examples.html#lambda-functions-examples-python). It distinguishes retriable from non-retriable errors. It attempts to reconnect to the Neptune cluster if the existing connection fails.
+- The function's trigger is DynamoDB streams. When the function returns an error, the Lambda service follows retry logic.  See [https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Streams.Lambda.html](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Streams.Lambda.html) and [https://docs.aws.amazon.com/lambda/latest/dg/with-ddb.html#services-dynamodb-eventsourcemapping](https://docs.aws.amazon.com/lambda/latest/dg/with-ddb.html#services-dynamodb-eventsourcemapping) for documentation on Lambda triggers for DynamoDB streams. Note:
+  * Lambda retries a finite number of times the Lambda function on error.
+  * Lambda splits/bisects the batch into two on error. This is useful when there is too much work to do in the batch or if part of the batch is causing an error.  
+
+There are two levels of retries: 
+- The Lambda function itself retries a drop several times with backoff. It also reconnected a failed connection to Neptune.
+- The Lambda service retries a failed batch from DynamoDB streams, as mentioned above.
+
+If there is a serious failure such that Neptune cannot drop objects, you can find a record of what was ATTEMPTED in the CloudWatch log group for this function. We recommend searching the log group for two strings:
+    * _NODELOG_
+    * _EDGELOG_
+
+Here are enhancements you might consider:
+- Customize trigger parameters discussed here [https://docs.aws.amazon.com/lambda/latest/dg/with-ddb.html#services-ddb-params](https://docs.aws.amazon.com/lambda/latest/dg/with-ddb.html#services-ddb-params). 
+In particular, set an SQS queue or SNS topic for discarded streams records. 
 
 ## License
 This library is licensed under the MIT-0 License. See the LICENSE file.
