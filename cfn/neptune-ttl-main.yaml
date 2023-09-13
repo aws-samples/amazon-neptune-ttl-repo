@@ -19,6 +19,9 @@ Parameters:
   DynamoStreamsStartingPosition:
     Type: String
     Default: LATEST
+  DynamoStreamsRetries:
+    Type: Number
+    Default: 2
   NeptuneTTLPropertyName:
     Description: The name of the property in Neptune that is used to denote TTL.
     Type: String
@@ -245,6 +248,7 @@ Resources:
         - StreamArn
       StartingPosition: !Ref DynamoStreamsStartingPosition
       BisectBatchOnFunctionError: true
+      MaximumRetryAttempts: !Ref DynamoStreamsRetries
 
   DynamoTTLTable:
     Type: AWS::DynamoDB::Table
@@ -328,17 +332,25 @@ Resources:
             and it was meant to expire at TTL too. So we drop that object here.
             In effect, we use TTL expiration in Dynamo guide us to expire in Neptune.
 
-            Error handling in the Lambda function that removes nodes and edges when they expire can be enhanced. 
-              * Here is current behavior:
+            Error handling in the Lambda function that removes nodes and edges when they expire can be enhanced. Here is current behavior:
                 * The function logs in CloudWatch all attempted drops. Errors are caught and logged in CloudWatch.
                 * The function addresses errors calling Neptune by following retry logic discussed in [https://docs.aws.amazon.com/neptune/latest/userguide/lambda-functions-examples.html#lambda-functions-examples-python](https://docs.aws.amazon.com/neptune/latest/userguide/lambda-functions-examples.html#lambda-functions-examples-python). It distinguishes retriable from non-retriable errors. 
                 * The function's trigger is DynamoDB streams. When the function returns an error, the Lambda service follows retry logic.  See [https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Streams.Lambda.html](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Streams.Lambda.html) and [https://docs.aws.amazon.com/lambda/latest/dg/with-ddb.html#services-dynamodb-eventsourcemapping](https://docs.aws.amazon.com/lambda/latest/dg/with-ddb.html#services-dynamodb-eventsourcemapping) for documentation on Lambda triggers for DynamoDB streams. Note:
-                  * Lambda retries an infinite number of times the Lambda function on error. 
+                  * Lambda retries a finite number of times the Lambda function on error. 
                   * Lambda splits/bisects the batch into two on error. This is useful when there is too much work to do in the batch or if part of the batch is causing an error.  
 
-              * Here are enhancements you might consider:
-                * Enhance the logic to further distinguish errors.
-                * Customize trigger parameters discussed here [https://docs.aws.amazon.com/lambda/latest/dg/with-ddb.html#services-ddb-params](https://docs.aws.amazon.com/lambda/latest/dg/with-ddb.html#services-ddb-params). In particular, set an SQS queue or SNS topic for discarded streams records. 
+            There are two levels of retries: 
+                * The Lambda function itself retries a drop several times with backoff. It also reconnected a failed connection to Neptune.
+                * The Lambda service retries a failed batch from DynamoDB streams, as mentioned above.
+
+            If there is a serious failure such that Neptune cannot drop objects, you can find a record of what was ATTEMPTED in the CloudWatch log group for this function. We recommend searching the log group for two strings:
+                * _NODELOG_
+                * _EDGELOG_
+
+            Here are enhancements you might consider:
+            * Customize trigger parameters discussed here [https://docs.aws.amazon.com/lambda/latest/dg/with-ddb.html#services-ddb-params](https://docs.aws.amazon.com/lambda/latest/dg/with-ddb.html#services-ddb-params). 
+            In particular, set an SQS queue or SNS topic for discarded streams records. 
+
             '''
 
             '''
@@ -396,12 +408,11 @@ Resources:
             network_errors = [OSError, ClientConnectorError]
             retriable_errors = [GremlinServerError, RuntimeError, Exception] + network_errors    
 
-            ignoreable_errors = [AttributeError]
-            ignoreable_error_msgs = ["'NoneType' object has no attribute 'submit'"]
-
             def is_retriable_error(e):
                 is_retriable = False
                 err_msg = str(e)
+                logger.error(e)
+                logger.info("Checking " + err_msg)
                 
                 if isinstance(e, tuple(network_errors)):
                     is_retriable = True
@@ -410,12 +421,32 @@ Resources:
                 
                 return is_retriable
 
-            def is_non_retriable_error(e):
+            def is_non_retriable_error(e):      
                 return not is_retriable_error(e)
+                
+            def is_reconnectable_error(e):
+                is_reconnectable = False
 
-            def is_ignorable_error(e):
                 err_msg = str(e)
-                return isinstance(e, tuple(ignoreable_errors)) or any(ignoreable_errors_msg in err_msg for ignoreable_err_msg in ignoreable_error_msgs)
+                
+                if isinstance(e, tuple(network_errors)):
+                    is_reconnectable = True
+                else:
+                    is_reconnectable = any(reconnectable_err_msg in err_msg for reconnectable_err_msg in reconnectable_err_msgs)
+                return is_reconnectable        
+
+            def reset_connection_if_connection_issue(params):
+                
+                e = sys.exc_info()[1]
+                is_reconnectable = is_reconnectable_error(e)
+
+                if is_reconnectable:
+                    global conn
+                    global g
+                    conn.close()
+                    conn = create_remote_connection()
+                    g = create_graph_traversal_source(conn)
+
 
             '''
             Connect
@@ -434,35 +465,22 @@ Resources:
                 conn = gremlin_utils.remote_connection()
                 return conn
 
-            def reset_connection_if_connection_issue(params):
-                is_reconnectable = False
 
-                e = sys.exc_info()[1]
-                err_msg = str(e)
-                
-                if isinstance(e, tuple(network_errors)):
-                    is_reconnectable = True
-                else:
-                    is_reconnectable = any(reconnectable_err_msg in err_msg for reconnectable_err_msg in reconnectable_err_msgs)
-                    
-                logger.info('is_reconnectable: {}'.format(is_reconnectable))
-                    
-                if is_reconnectable:
-                    global conn
-                    global g
-                    conn.close()
-                    conn = create_remote_connection()
-                    g = create_graph_traversal_source(conn)
-
-            conn = create_remote_connection()
-            g = create_graph_traversal_source(conn)
+            conn = None
+            g = None
+            try:
+                conn = create_remote_connection()
+                g = create_graph_traversal_source(conn)
+            except Exception as ex:
+                template = "Neptune connect exception of type {0} occurred. Arguments:\n{1!r}"
+                message = template.format(type(ex).__name__, ex.args)
+                logger.error("Exception processing Neptune object " + message)
 
             ''' 
             Drops
             '''
 
             EDGE_CHUNK_SIZE=10000
-
             @backoff.on_exception(backoff.constant,
                 tuple(retriable_errors),
                 max_tries=5,
@@ -471,22 +489,31 @@ Resources:
                 on_backoff=reset_connection_if_connection_issue,
                 interval=1)
             def drop_query(**kwargs):
-                if 'edge' in kwargs:
-                    edge = kwargs['edge']
-                    logger.info('dropping edge' + str(edge))
-                    g.E(edge['id']).drop().toList()
-                    logger.info('edge dropped' + str(edge))
-                elif 'node' in kwargs:
-                    node = kwargs['node']
-                    logger.info('dropping node' + str(node))
-                    while g.V(node['id']).outE().limit(1).hasNext():
-                        logger.info("dropping next chunk " + str(node))
-                        g.V(node['id']).outE().limit(EDGE_CHUNK_SIZE).drop().iterate()
-                    g.V(node['id']).drop().toList()
-                    logger.info('node dropped' + str(node))
-
-                return "ok"
+                try:
+                    if 'edge' in kwargs:
+                        edge = kwargs['edge']
+                        logger.info('dropping edge' + str(edge))
+                        g.E(edge['id']).drop().toList()
+                        logger.info('edge dropped' + str(edge))
+                    elif 'node' in kwargs:
+                        node = kwargs['node']
+                        logger.info('dropping node' + str(node))
+                        while g.V(node['id']).outE().limit(1).hasNext():
+                            logger.info("dropping next chunk " + str(node))
+                            g.V(node['id']).outE().limit(EDGE_CHUNK_SIZE).drop().iterate()
+                        g.V(node['id']).drop().toList()
+                        logger.info('node dropped' + str(node))
+                except Exception as ex:
+                    template = "An exception of type {0} occurred. Arguments:\n{1!r}"
+                    message = template.format(type(ex).__name__, ex.args)
+                    can_retry = is_retriable_error(ex)
+                    can_recon = is_reconnectable_error(ex)
+                    error_detail = [kwargs,message, can_retry, can_recon]
+                    logger.error("Exception processing Neptune object " + str(error_detail))
+                    raise
                 
+                return "ok"
+
             def build_do_list(event):
                 do_list = {'nodes': [], 'edges': []}
                 for r in event['Records']:
@@ -499,14 +526,16 @@ Resources:
                             do_list['nodes'].append({'id': obj_id, 'seq': sseq})
                         elif obj_type == 'edge':
                             do_list['edges'].append({'id': obj_id, 'seq': sseq})
-                            
+
                 # We will have this do list in our log. If timeout or error out before getting to all of them, 
                 # we have a log of the list
-                logger.info("Do list")
-                logger.info(do_list)
+                if len(do_list['nodes']) > 0:
+                    logger.info("_NODELOG_ " + str(do_list['nodes']) )
+                if len(do_list['edges']) > 0:
+                    logger.info("_EDGELOG_ " + str(do_list['edges']) )
                 return do_list
                 
-            def lambda_handler(event, context):
+            def do_lambda_handler(event, context):
                 do_list = None
                 if 'Records' in event:
                     do_list = build_do_list(event)
@@ -523,7 +552,15 @@ Resources:
                 # any errors that fall through lead to an exception, which force a retry
                 
                 # no errors, return success
+                logger.info("Returning success from lambda")
                 return {'statusCode': 200, 'body': json.dumps('Success')} 
+
+def lambda_handler(event, context):
+    try:
+        return do_lambda_handler(event, context)
+    except:
+        logger.info("Returning error from lambda")
+        raise    
 
 
         Role: !GetAtt
